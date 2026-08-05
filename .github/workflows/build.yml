@@ -1,0 +1,48 @@
+name: Cross-platform build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            extension: ""
+          - goos: darwin
+            goarch: amd64
+            extension: ""
+          - goos: darwin
+            goarch: arm64
+            extension: ""
+          - goos: windows
+            goarch: amd64
+            extension: .exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build standalone binaries
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/mockingo-${GOOS}-${GOARCH}${{ matrix.extension }}" ./cmd/mockingo
+          go build -trimpath -o "dist/mockingo-gateway-${GOOS}-${GOARCH}${{ matrix.extension }}" ./cmd/mockingo-gateway
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mockingo-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
