@@ -24,6 +24,8 @@ type Config struct {
 	RequestTimeout time.Duration
 	OnState        func(string)
 	Verbose        func(string, ...any)
+	Reregister     func(context.Context) (Registration, error)
+	PublicURL      string
 }
 
 type Agent struct {
@@ -41,8 +43,8 @@ func New(config Config) *Agent {
 	return &Agent{config: config, client: client}
 }
 
-// Run reconnects until its parent context is cancelled. A tunnel registration
-// and session token stay unchanged across those connections.
+// Run reconnects until its parent context is cancelled. It first reuses the
+// temporary session and obtains a fresh one through Reregister after expiry.
 func (a *Agent) Run(ctx context.Context) error {
 	delay := time.Second
 	connectedOnce := false
@@ -52,12 +54,32 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		headers := http.Header{"Authorization": []string{"Bearer " + a.config.SessionToken}}
 		ws, response, err := websocket.DefaultDialer.DialContext(ctx, a.config.ConnectURL, headers)
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if (status == http.StatusUnauthorized || status == http.StatusNotFound) && a.config.Reregister != nil {
+				if a.config.OnState != nil {
+					a.config.OnState("Tunnel session expired. Creating a new session...")
+				}
+				registration, registerErr := a.config.Reregister(ctx)
+				if registerErr == nil {
+					a.config.ConnectURL = registration.ConnectURL
+					a.config.SessionToken = registration.SessionToken
+					a.config.PublicURL = registration.PublicURL
+					delay = time.Second
+					continue
+				}
+				if a.config.Verbose != nil {
+					a.config.Verbose("new tunnel registration failed: %v", registerErr)
+				}
 			}
 			if a.config.Verbose != nil {
 				a.config.Verbose("tunnel connection failed: %v", err)
@@ -69,9 +91,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			continue
 		}
 		if connectedOnce && a.config.OnState != nil {
-			a.config.OnState("Reconnected to Mockingo gateway.")
+			a.config.OnState("Reconnected. Public endpoint unchanged:\n" + a.config.PublicURL)
 		} else if a.config.OnState != nil {
-			a.config.OnState("Connected to Mockingo gateway.")
+			a.config.OnState("Connected to Mockingo Gateway.")
 		}
 		connectedOnce = true
 		delay = time.Second
@@ -80,7 +102,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		}
 		if a.config.OnState != nil {
-			a.config.OnState("Connection lost; reconnecting...")
+			a.config.OnState("Connection lost. Reconnecting...")
 		}
 		if a.config.Verbose != nil && err != nil {
 			a.config.Verbose("tunnel disconnected: %v", err)

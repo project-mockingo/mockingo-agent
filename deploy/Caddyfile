@@ -1,0 +1,16 @@
+{
+	email {$ACME_EMAIL}
+}
+
+api.{$MOCKINGO_BASE_DOMAIN}, *.{$MOCKINGO_BASE_DOMAIN} {
+	tls {
+		dns route53
+	}
+
+	@metrics path /metrics
+	respond @metrics 404
+
+	reverse_proxy mockingo-gateway:9090 {
+		header_up Host {host}
+	}
+}

@@ -1,0 +1,10 @@
+.git
+.github
+.toolcache
+bin
+dist
+current-datetime-app
+current-datetime-app.zip
+*.exe
+*.test
+.env

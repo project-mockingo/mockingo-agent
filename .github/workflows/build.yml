@@ -18,6 +18,9 @@ jobs:
           - goos: linux
             goarch: amd64
             extension: ""
+          - goos: linux
+            goarch: arm64
+            extension: ""
           - goos: darwin
             goarch: amd64
             extension: ""

@@ -1,0 +1,86 @@
+name: mockingo
+
+services:
+  postgres:
+    image: postgres:17.10-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  mockingo-gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    environment:
+      MOCKINGO_ENV: ${MOCKINGO_ENV}
+      MOCKINGO_GATEWAY_ADDR: :9090
+      MOCKINGO_BASE_DOMAIN: ${MOCKINGO_BASE_DOMAIN}
+      MOCKINGO_PUBLIC_SCHEME: ${MOCKINGO_PUBLIC_SCHEME}
+      MOCKINGO_API_PUBLIC_URL: ${MOCKINGO_API_PUBLIC_URL}
+      MOCKINGO_API_TOKEN: ${MOCKINGO_API_TOKEN}
+      DATABASE_URL: ${DATABASE_URL}
+      MOCKINGO_TRUSTED_PROXY_CIDRS: ${MOCKINGO_TRUSTED_PROXY_CIDRS}
+      MOCKINGO_LOG_LEVEL: ${MOCKINGO_LOG_LEVEL}
+      MOCKINGO_METRICS_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "mockingo-gateway", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 15s
+    networks: [internal]
+
+  caddy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.caddy
+    restart: unless-stopped
+    environment:
+      MOCKINGO_BASE_DOMAIN: ${MOCKINGO_BASE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    depends_on:
+      mockingo-gateway:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 15s
+    networks: [internal, edge]
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    internal: true
+  edge:

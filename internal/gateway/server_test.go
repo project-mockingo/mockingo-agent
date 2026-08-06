@@ -2,17 +2,97 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/mockingo/mockingo-cli/internal/endpoint"
 	"github.com/mockingo/mockingo-cli/pkg/tunnelprotocol"
 )
 
 func testServer() *Server {
 	return NewServer(Config{BaseDomain: "localhost", PublicScheme: "http", DevToken: "development-token"})
+}
+
+func decodeError(t *testing.T, recorder *httptest.ResponseRecorder) apiError {
+	t.Helper()
+	var value apiError
+	if err := json.Unmarshal(recorder.Body.Bytes(), &value); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func TestEndpointOfflineNotFoundPersistenceAndDeletion(t *testing.T) {
+	t.Parallel()
+	repository := endpoint.NewMemoryRepository()
+	server := NewServer(Config{BaseDomain: "mockingo.click", PublicScheme: "https", APIToken: "test-token", Repository: repository})
+	created := createTunnelRequest(t, server, "test-token", "spring-demo")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", created.Code, created.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://gateway/hello", nil)
+	request.Host = "spring-demo.mockingo.click"
+	offline := httptest.NewRecorder()
+	server.ServeHTTP(offline, request)
+	if offline.Code != http.StatusBadGateway || decodeError(t, offline).Code != "tunnel_offline" {
+		t.Fatalf("offline = %d %s", offline.Code, offline.Body.String())
+	}
+
+	restarted := NewServer(Config{BaseDomain: "mockingo.click", PublicScheme: "https", APIToken: "test-token", Repository: repository})
+	request = httptest.NewRequest(http.MethodGet, "http://gateway/hello", nil)
+	request.Host = "spring-demo.mockingo.click"
+	offline = httptest.NewRecorder()
+	restarted.ServeHTTP(offline, request)
+	if offline.Code != http.StatusBadGateway || decodeError(t, offline).Code != "tunnel_offline" {
+		t.Fatalf("after restart = %d %s", offline.Code, offline.Body.String())
+	}
+	second := createTunnelRequest(t, restarted, "test-token", "spring-demo")
+	var secondRegistration createResponse
+	_ = json.Unmarshal(second.Body.Bytes(), &secondRegistration)
+	var firstRegistration createResponse
+	_ = json.Unmarshal(created.Body.Bytes(), &firstRegistration)
+	if second.Code != http.StatusCreated || secondRegistration.EndpointID != firstRegistration.EndpointID || secondRegistration.Hostname != firstRegistration.Hostname {
+		t.Fatalf("reregistration changed endpoint: first=%#v second=%#v", firstRegistration, secondRegistration)
+	}
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "http://gateway/api/v1/endpoints/spring-demo", nil)
+	deleteRequest.Header.Set("Authorization", "Bearer test-token")
+	deleted := httptest.NewRecorder()
+	restarted.ServeHTTP(deleted, deleteRequest)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", deleted.Code, deleted.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://gateway/hello", nil)
+	request.Host = "spring-demo.mockingo.click"
+	missing := httptest.NewRecorder()
+	restarted.ServeHTTP(missing, request)
+	if missing.Code != http.StatusNotFound || decodeError(t, missing).Code != "endpoint_not_found" {
+		t.Fatalf("missing = %d %s", missing.Code, missing.Body.String())
+	}
+	recreated := createTunnelRequest(t, restarted, "test-token", "spring-demo")
+	if recreated.Code != http.StatusCreated {
+		t.Fatalf("recreate = %d %s", recreated.Code, recreated.Body.String())
+	}
+}
+
+type failingRepository struct{ endpoint.Repository }
+
+func (f failingRepository) Ping(context.Context) error { return errors.New("down") }
+
+func TestHealthEndpoints(t *testing.T) {
+	t.Parallel()
+	server := NewServer(Config{BaseDomain: "localhost", PublicScheme: "http", APIToken: "token", Repository: failingRepository{endpoint.NewMemoryRepository()}})
+	for path, want := range map[string]int{"/health/live": http.StatusOK, "/health/ready": http.StatusServiceUnavailable} {
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://gateway"+path, nil))
+		if recorder.Code != want {
+			t.Errorf("%s = %d, want %d", path, recorder.Code, want)
+		}
+	}
 }
 
 func createTunnelRequest(t *testing.T, server http.Handler, token, name string) *httptest.ResponseRecorder {

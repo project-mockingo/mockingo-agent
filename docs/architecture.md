@@ -23,7 +23,7 @@ The CLI always initiates the network connection. The user application remains on
 
 `mockingo login` stores the gateway URL and API token in the operating system's user configuration directory. `mockingo expose` waits for the selected local port and calls `POST /api/v1/tunnels`. The gateway validates the name and returns a public URL, WebSocket connection URL, and a cryptographically random session token. The API token and tunnel session token are separate credentials.
 
-Registrations live in gateway memory. A connected name is exclusive. On normal shutdown, the CLI deletes its registration. After an unexpected socket loss, that registration accepts the same session token for five minutes so the agent can reconnect without changing its public hostname.
+Endpoint reservations live in PostgreSQL in production and remain until explicitly deleted. A temporary tunnel session lives only in gateway memory and a connected endpoint is exclusive. Stopping the CLI takes the endpoint offline without deleting it. A disconnected session can reconnect briefly; after expiry the CLI creates a fresh authenticated session for the same persistent endpoint and hostname.
 
 ## Data plane
 
@@ -37,7 +37,7 @@ Hop-by-hop headers are removed in both directions. The gateway adds `X-Forwarded
 
 Request and response bodies are buffered in memory and capped at 10 MiB. Oversized public requests receive `413 Payload Too Large`. A missing or failed local service receives `502 Bad Gateway`; request deadlines receive `504 Gateway Timeout`. A disconnected tunnel returns `502` until it reconnects.
 
-The protocol does not support streaming, SSE, or application WebSocket forwarding. TLS termination and certificate management belong to an external reverse proxy in front of the reference gateway.
+The protocol does not support streaming, SSE, or application WebSocket forwarding. Caddy terminates production TLS/WSS with a wildcard certificate obtained through Route 53 DNS-01.
 
 ## Process lifecycle
 

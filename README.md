@@ -1,110 +1,72 @@
 # Mockingo CLI
 
-Mockingo exposes an HTTP service running on your computer through a stable public hostname. The CLI starts an optional child process, waits for its local port, and opens an outbound WebSocket connection to the Mockingo gateway. No Dockerfile, router port forwarding, or inbound firewall rule is required.
+Mockingo exposes an HTTP service on your computer through a stable public hostname. Stage 2A adds persistent PostgreSQL endpoint reservations and a production Caddy/Route 53 deployment while retaining the outbound WebSocket tunnel and local-development workflow.
 
-This repository contains the first working MVP: the `mockingo` CLI, a small reference `mockingo-gateway`, the shared versioned tunnel protocol, and automated tests.
+```text
+Internet client -> HTTPS Caddy -> Mockingo Gateway -> WSS CLI -> 127.0.0.1:8080
+                                      |
+                                      +-> PostgreSQL endpoint reservations
+```
 
-## MVP scope
-
-The MVP supports saved token configuration, one HTTP port per CLI session, optional local process startup, stable name-based hostnames, concurrent buffered HTTP forwarding, clean process-tree shutdown, and tunnel reconnection with exponential backoff.
-
-It does not deploy applications, run containers, forward arbitrary TCP/UDP or application WebSockets, stream uploads or Server-Sent Events, provide a browser UI, or implement a distributed production control plane.
-
-## Build from source
+## Build and test
 
 Go 1.23 or newer is required.
 
 ```bash
-git clone https://github.com/mockingo/mockingo-cli.git
-cd mockingo-cli
-go build -o bin/mockingo ./cmd/mockingo
-go build -o bin/mockingo-gateway ./cmd/mockingo-gateway
-```
-
-On Windows, use `bin/mockingo.exe` and `bin/mockingo-gateway.exe`. `make build` performs the same build on systems with Make.
-
-## Run a local gateway
-
-Use development-friendly hostname and scheme settings:
-
-```bash
-MOCKINGO_GATEWAY_ADDR=:9090 \
-MOCKINGO_BASE_DOMAIN=localhost \
-MOCKINGO_PUBLIC_SCHEME=http \
-MOCKINGO_DEV_TOKEN=development-token \
-go run ./cmd/mockingo-gateway
-```
-
-PowerShell equivalent:
-
-```powershell
-$env:MOCKINGO_GATEWAY_ADDR = ':9090'
-$env:MOCKINGO_BASE_DOMAIN = 'localhost'
-$env:MOCKINGO_PUBLIC_SCHEME = 'http'
-$env:MOCKINGO_DEV_TOKEN = 'development-token'
-go run ./cmd/mockingo-gateway
-```
-
-Save the CLI configuration:
-
-```bash
-mockingo login --api-url http://localhost:9090 --token development-token
-```
-
-Expose an application already listening on port 8080:
-
-```bash
-mockingo expose --name demo --http 8080
-```
-
-Or start and expose a Java application while preserving every argument boundary:
-
-```bash
-mockingo expose \
-  --name spring-demo \
-  --http 8080 \
-  -- java -jar target/application.jar
-```
-
-Optional flags are `--cwd`, repeatable `--env KEY=VALUE`, `--startup-timeout`, `--request-timeout`, and `--verbose`.
-
-Windows batch files are launched through `cmd.exe /C` automatically:
-
-```powershell
-mockingo expose --name demo --http 8080 --cwd .\application -- .\start-server.cmd --port 8080
-```
-
-Test the local hostname route without DNS configuration:
-
-```bash
-curl -H "Host: demo.localhost" http://localhost:9090/hello
-```
-
-## Architecture
-
-The gateway routes a public request by its `Host` header, sends a versioned JSON message through the CLI's outbound WebSocket, and waits for the matching response ID. The CLI can handle multiple requests concurrently but always forwards to the user-selected `127.0.0.1` port. See [docs/architecture.md](docs/architecture.md) for protocol and lifecycle details and [docs/local-development.md](docs/local-development.md) for a complete local walkthrough.
-
-## Security notes
-
-- API and session tokens are never printed. The saved config is mode `0600` on Unix.
-- Session tokens are cryptographically random, scoped to one registration, sent in an authorization header, and never placed in a URL.
-- The development gateway uses one environment-provided API token and in-memory state. It is a reference server, not a hardened multi-tenant service.
-- TLS is intentionally external. A production deployment must place the gateway behind a TLS-terminating reverse proxy and preserve the original `Host` header.
-- Anyone who knows the development API token can register names. There is no RBAC, rate limiting, audit log, or abuse prevention in this MVP.
-
-## Current limitations
-
-Protocol version 1 buffers each request and response body in memory and limits each to 10 MiB. Streaming uploads, streaming responses, SSE, and application WebSocket upgrades are unsupported. Registrations are in memory, disconnected sessions may reconnect for five minutes, and a gateway restart loses all registrations. Windows process shutdown uses the best practical built-in process-tree mechanisms available without CGO.
-
-Planned work after validating the MVP includes streaming protocol frames, stronger identity and authorization, durable/distributed routing state, observability and rate limiting, production gateway deployment guidance, and application WebSocket support.
-
-## Development
-
-```bash
+make build
 make test
-go fmt ./...
-go vet ./...
-go test ./...
+make vet
+make cross-build
 ```
 
-Tests require no internet access or external infrastructure after Go modules are downloaded.
+PostgreSQL integration tests use `TEST_DATABASE_URL`:
+
+```bash
+TEST_DATABASE_URL='postgres://mockingo:test-password@localhost:5432/mockingo_test?sslmode=disable' make test-integration
+```
+
+## Public usage
+
+```bash
+mockingo login --api-url https://api.mockingo.click --token "$MOCKINGO_API_TOKEN"
+mockingo expose --name spring-demo --http 8080 -- java -jar target/application.jar
+curl https://spring-demo.mockingo.click/hello
+```
+
+Stopping `expose` takes the tunnel offline but does not release `spring-demo.mockingo.click`. Manage durable reservations with:
+
+```bash
+mockingo endpoints list
+mockingo endpoints list --json
+mockingo endpoints delete spring-demo
+mockingo endpoints delete spring-demo --force
+```
+
+## Local development
+
+```bash
+export MOCKINGO_ENV=development
+export MOCKINGO_BASE_DOMAIN=localhost
+export MOCKINGO_PUBLIC_SCHEME=http
+export MOCKINGO_API_PUBLIC_URL=http://localhost:9090
+export MOCKINGO_DEV_TOKEN=development-token
+go run ./cmd/mockingo-gateway
+```
+
+In another terminal:
+
+```bash
+go run ./cmd/mockingo login --api-url http://localhost:9090 --token development-token
+go run ./cmd/mockingo expose --name spring-demo --http 8080 -- python3 -m http.server 8080
+curl -H 'Host: spring-demo.localhost' http://localhost:9090/
+```
+
+Development mode uses an in-memory endpoint repository when `DATABASE_URL` is absent. Set `DATABASE_URL` and run `go run ./cmd/mockingo-gateway migrate` to exercise persistence locally.
+
+## Production deployment
+
+The production stack is in `deploy/` and contains PostgreSQL, the gateway, and a custom Caddy build with the Route 53 DNS module. Only Caddy publishes ports. Start with [deploy/README.md](deploy/README.md), then read [production deployment](docs/production-deployment.md), [Route 53 DNS](docs/route53-dns.md), and [security](docs/security.md).
+
+## Current limits
+
+Protocol v1 buffers request and response bodies and caps each at 10 MiB. It supports concurrent HTTP request multiplexing, but not streaming, SSE, application WebSocket proxying, TCP/UDP forwarding, remote folders, container execution, or a dashboard. Stage 2A is a single-owner API-token installation. Browser/OAuth identity, users, teams, and RBAC are planned for Stage 2B.

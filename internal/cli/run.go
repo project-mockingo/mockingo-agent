@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/mockingo/mockingo-cli/internal/agent"
@@ -21,12 +24,13 @@ import (
 )
 
 type App struct {
+	Stdin      io.Reader
 	Stdout     io.Writer
 	Stderr     io.Writer
 	ConfigPath string
 }
 
-func New() *App { return &App{Stdout: os.Stdout, Stderr: os.Stderr} }
+func New() *App { return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} }
 
 func (a *App) Run(ctx context.Context, args []string) int {
 	if len(args) == 0 {
@@ -40,6 +44,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.login(args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
+	case "endpoints":
+		code, err = a.endpoints(ctx, args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -60,6 +66,9 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "Usage:")
 	fmt.Fprintln(a.Stdout, "  mockingo login --api-url URL --token TOKEN")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "  mockingo endpoints list [--json]")
+	fmt.Fprintln(a.Stdout, "  mockingo endpoints delete NAME [--force]")
+	fmt.Fprintln(a.Stdout, "\nLogin saves an API token. Browser-based authentication is planned for a later stage.")
 }
 
 func (a *App) path() (string, error) {
@@ -73,7 +82,7 @@ func (a *App) login(args []string) error {
 	set := flag.NewFlagSet("login", flag.ContinueOnError)
 	set.SetOutput(a.Stderr)
 	apiURL := set.String("api-url", "", "gateway API URL")
-	token := set.String("token", "", "gateway token")
+	token := set.String("token", "", "gateway management API token")
 	if err := set.Parse(args); err != nil {
 		return fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -180,12 +189,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("gateway registration failure: %w", err)
 	}
-	defer func() {
-		deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer deleteCancel()
-		_ = agent.Delete(deleteCtx, httpClient, cfg.APIURL, cfg.Token, registration.ID)
-	}()
-
+	fmt.Fprintf(a.Stdout, "Registering endpoint %s...\n", registration.Hostname)
 	state := func(message string) { fmt.Fprintln(a.Stdout, message) }
 	var verbose func(string, ...any)
 	if options.Verbose {
@@ -194,7 +198,10 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	tunnelAgent := agent.New(agent.Config{
 		ConnectURL: registration.ConnectURL, SessionToken: registration.SessionToken,
 		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
-		OnState: state, Verbose: verbose,
+		OnState: state, Verbose: verbose, PublicURL: registration.PublicURL,
+		Reregister: func(registerCtx context.Context) (agent.Registration, error) {
+			return agent.Register(registerCtx, httpClient, cfg.APIURL, cfg.Token, options.Name, options.HTTPPort)
+		},
 	})
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- tunnelAgent.Run(runCtx) }()
@@ -225,6 +232,84 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 		return 1, fmt.Errorf("tunnel connection failure: %w", err)
 	case <-runCtx.Done():
 		return 0, nil
+	}
+}
+
+func (a *App) endpoints(ctx context.Context, args []string) (int, error) {
+	if len(args) == 0 {
+		return 2, errors.New("invalid arguments: expected 'list' or 'delete'")
+	}
+	path, err := a.path()
+	if err != nil {
+		return 1, fmt.Errorf("configuration error: %w", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return 1, fmt.Errorf("configuration error: %w", err)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	switch args[0] {
+	case "list":
+		set := flag.NewFlagSet("endpoints list", flag.ContinueOnError)
+		set.SetOutput(a.Stderr)
+		asJSON := set.Bool("json", false, "print JSON")
+		if err := set.Parse(args[1:]); err != nil || set.NArg() != 0 {
+			return 2, errors.New("invalid arguments for endpoints list")
+		}
+		values, err := agent.ListEndpoints(ctx, client, cfg.APIURL, cfg.Token)
+		if err != nil {
+			return 1, err
+		}
+		if *asJSON {
+			encoder := json.NewEncoder(a.Stdout)
+			encoder.SetIndent("", "  ")
+			return 0, encoder.Encode(map[string]any{"endpoints": values})
+		}
+		writer := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(writer, "NAME\tHOSTNAME\tSTATUS")
+		for _, value := range values {
+			fmt.Fprintf(writer, "%s\t%s\t%s\n", value.Name, value.Hostname, value.Status)
+		}
+		if err := writer.Flush(); err != nil {
+			return 1, err
+		}
+		return 0, nil
+	case "delete":
+		force := false
+		name := ""
+		for _, value := range args[1:] {
+			switch {
+			case value == "--force":
+				force = true
+			case strings.HasPrefix(value, "-") || name != "":
+				return 2, errors.New("invalid arguments: endpoints delete requires NAME and optional --force")
+			default:
+				name = strings.ToLower(value)
+			}
+		}
+		if name == "" {
+			return 2, errors.New("invalid arguments: endpoints delete requires NAME")
+		}
+		if err := naming.Validate(name); err != nil {
+			return 2, fmt.Errorf("invalid arguments: %w", err)
+		}
+		if !force {
+			fmt.Fprintf(a.Stdout, "Delete endpoint %s? Type its name to confirm: ", name)
+			input, readErr := bufio.NewReader(a.Stdin).ReadString('\n')
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return 1, fmt.Errorf("read confirmation: %w", readErr)
+			}
+			if strings.TrimSpace(input) != name {
+				return 1, errors.New("deletion cancelled")
+			}
+		}
+		if err := agent.DeleteEndpoint(ctx, client, cfg.APIURL, cfg.Token, name); err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(a.Stdout, "Endpoint %s deleted.\n", name)
+		return 0, nil
+	default:
+		return 2, fmt.Errorf("invalid arguments: unknown endpoints command %q", args[0])
 	}
 }
 

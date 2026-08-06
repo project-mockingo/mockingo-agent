@@ -2,40 +2,47 @@ package gateway
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
 
-	"github.com/mockingo/mockingo-cli/internal/auth"
+	"github.com/mockingo/mockingo-cli/internal/endpoint"
 )
 
 var (
-	ErrNameConnected = errors.New("tunnel name is already connected")
-	ErrNotFound      = errors.New("tunnel not found")
+	ErrNameConnected = errors.New("endpoint is already connected")
+	ErrNotFound      = errors.New("tunnel session not found")
 	ErrUnauthorized  = errors.New("invalid tunnel session")
-	ErrConnected     = errors.New("tunnel is already connected")
+	ErrConnected     = errors.New("tunnel session is already connected")
 )
 
 type Tunnel struct {
-	ID           string
-	Name         string
-	LocalPort    int
-	SessionToken string
-	CreatedAt    time.Time
-	ResumeUntil  time.Time
-	connection   *connection
+	ID               string
+	EndpointID       string
+	Name             string
+	LocalPort        int
+	SessionTokenHash [32]byte
+	CreatedAt        time.Time
+	ConnectedAt      time.Time
+	LastSeenAt       time.Time
+	DisconnectedAt   time.Time
+	ResumeUntil      time.Time
+	Active           bool
+	connection       *connection
 }
 
 type Store struct {
-	mu     sync.RWMutex
-	byID   map[string]*Tunnel
-	byName map[string]*Tunnel
-	now    func() time.Time
+	mu           sync.RWMutex
+	byID         map[string]*Tunnel
+	byEndpointID map[string]*Tunnel
+	now          func() time.Time
 }
 
 func NewStore() *Store {
-	return &Store{byID: make(map[string]*Tunnel), byName: make(map[string]*Tunnel), now: time.Now}
+	return &Store{byID: make(map[string]*Tunnel), byEndpointID: make(map[string]*Tunnel), now: time.Now}
 }
 
 func randomHex(bytes int) (string, error) {
@@ -46,33 +53,51 @@ func randomHex(bytes int) (string, error) {
 	return hex.EncodeToString(buffer), nil
 }
 
-func (s *Store) Create(name string, port int) (*Tunnel, error) {
+func randomUUID() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	buffer[6] = (buffer[6] & 0x0f) | 0x40
+	buffer[8] = (buffer[8] & 0x3f) | 0x80
+	return hex.EncodeToString(buffer[0:4]) + "-" + hex.EncodeToString(buffer[4:6]) + "-" + hex.EncodeToString(buffer[6:8]) + "-" + hex.EncodeToString(buffer[8:10]) + "-" + hex.EncodeToString(buffer[10:16]), nil
+}
+
+func (s *Store) Create(value endpoint.Endpoint, port int) (*Tunnel, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current := s.byName[name]; current != nil {
+	if current := s.byEndpointID[value.ID]; current != nil {
 		if current.connection != nil {
-			return nil, ErrNameConnected
+			return nil, "", ErrNameConnected
 		}
 		delete(s.byID, current.ID)
-		delete(s.byName, name)
 	}
-	id, err := randomHex(16)
+	id, err := randomUUID()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	token, err := randomHex(32)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	tunnel := &Tunnel{ID: id, Name: name, LocalPort: port, SessionToken: token, CreatedAt: s.now()}
+	now := s.now().UTC()
+	tunnel := &Tunnel{
+		ID: id, EndpointID: value.ID, Name: value.Name, LocalPort: port,
+		SessionTokenHash: sha256.Sum256([]byte(token)), CreatedAt: now,
+		ResumeUntil: now.Add(5 * time.Minute),
+	}
 	s.byID[id] = tunnel
-	s.byName[name] = tunnel
-	return tunnel, nil
+	s.byEndpointID[value.ID] = tunnel
+	return tunnel, token, nil
 }
 
-func (s *Store) Delete(id string) {
+func (s *Store) DeleteSession(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.deleteSessionLocked(id)
+}
+
+func (s *Store) deleteSessionLocked(id string) {
 	tunnel := s.byID[id]
 	if tunnel == nil {
 		return
@@ -81,8 +106,16 @@ func (s *Store) Delete(id string) {
 		tunnel.connection.close()
 	}
 	delete(s.byID, id)
-	if s.byName[tunnel.Name] == tunnel {
-		delete(s.byName, tunnel.Name)
+	if s.byEndpointID[tunnel.EndpointID] == tunnel {
+		delete(s.byEndpointID, tunnel.EndpointID)
+	}
+}
+
+func (s *Store) DeleteEndpoint(endpointID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if tunnel := s.byEndpointID[endpointID]; tunnel != nil {
+		s.deleteSessionLocked(tunnel.ID)
 	}
 }
 
@@ -93,7 +126,12 @@ func (s *Store) AuthenticateSession(id, authorization string) error {
 	if tunnel == nil {
 		return ErrNotFound
 	}
-	if !auth.BearerMatches(authorization, tunnel.SessionToken) {
+	const prefix = "Bearer "
+	if len(authorization) <= len(prefix) || authorization[:len(prefix)] != prefix {
+		return ErrUnauthorized
+	}
+	actual := sha256.Sum256([]byte(authorization[len(prefix):]))
+	if subtle.ConstantTimeCompare(actual[:], tunnel.SessionTokenHash[:]) != 1 {
 		return ErrUnauthorized
 	}
 	if !tunnel.ResumeUntil.IsZero() && s.now().After(tunnel.ResumeUntil) {
@@ -102,19 +140,25 @@ func (s *Store) AuthenticateSession(id, authorization string) error {
 	return nil
 }
 
-func (s *Store) Attach(id string, conn *connection) error {
+func (s *Store) Attach(id string, conn *connection) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tunnel := s.byID[id]
 	if tunnel == nil {
-		return ErrNotFound
+		return false, ErrNotFound
 	}
 	if tunnel.connection != nil {
-		return ErrConnected
+		return false, ErrConnected
 	}
+	reconnected := !tunnel.LastSeenAt.IsZero()
 	tunnel.connection = conn
+	now := s.now().UTC()
+	tunnel.ConnectedAt = now
+	tunnel.LastSeenAt = now
+	tunnel.DisconnectedAt = time.Time{}
 	tunnel.ResumeUntil = time.Time{}
-	return nil
+	tunnel.Active = true
+	return reconnected, nil
 }
 
 func (s *Store) Disconnect(id string, conn *connection) {
@@ -122,15 +166,41 @@ func (s *Store) Disconnect(id string, conn *connection) {
 	defer s.mu.Unlock()
 	if tunnel := s.byID[id]; tunnel != nil && tunnel.connection == conn {
 		tunnel.connection = nil
-		tunnel.ResumeUntil = s.now().Add(5 * time.Minute)
+		now := s.now().UTC()
+		tunnel.LastSeenAt = now
+		tunnel.DisconnectedAt = now
+		tunnel.ResumeUntil = now.Add(5 * time.Minute)
+		tunnel.Active = false
 	}
 }
 
-func (s *Store) ConnectionByName(name string) *connection {
+func (s *Store) ConnectionByEndpoint(endpointID string) *connection {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if tunnel := s.byName[name]; tunnel != nil {
+	if tunnel := s.byEndpointID[endpointID]; tunnel != nil {
 		return tunnel.connection
 	}
 	return nil
+}
+
+func (s *Store) Connected(endpointID string) bool { return s.ConnectionByEndpoint(endpointID) != nil }
+
+func (s *Store) ActiveCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	count := 0
+	for _, tunnel := range s.byEndpointID {
+		if tunnel.connection != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Store) CloseAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.byID {
+		s.deleteSessionLocked(id)
+	}
 }

@@ -26,6 +26,8 @@ Terminal 1, the gateway:
 ```bash
 MOCKINGO_BASE_DOMAIN=localhost \
 MOCKINGO_PUBLIC_SCHEME=http \
+MOCKINGO_ENV=development \
+MOCKINGO_API_PUBLIC_URL=http://localhost:9090 \
 MOCKINGO_DEV_TOKEN=development-token \
 go run ./cmd/mockingo-gateway
 ```
@@ -63,5 +65,8 @@ Stop the CLI with Ctrl+C. If it started the application, it also terminates the 
 |---|---|---|
 | `MOCKINGO_GATEWAY_ADDR` | `:9090` | Listen address |
 | `MOCKINGO_BASE_DOMAIN` | `mockingo.click` | Hostname routing suffix |
-| `MOCKINGO_DEV_TOKEN` | `development-token` | Development API bearer token |
+| `MOCKINGO_ENV` | `production` | Must be `development` to allow the development token |
+| `MOCKINGO_API_PUBLIC_URL` | derived from domain | URL used to construct the WebSocket connection URL |
+| `MOCKINGO_DEV_TOKEN` | none | Development-only API bearer token |
+| `DATABASE_URL` | none in development | Optional PostgreSQL persistence; required in production |
 | `MOCKINGO_PUBLIC_SCHEME` | `https` | Public URL and forwarded scheme |
