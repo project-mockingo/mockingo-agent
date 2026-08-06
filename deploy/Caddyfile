@@ -4,7 +4,11 @@
 
 api.{$MOCKINGO_BASE_DOMAIN}, *.{$MOCKINGO_BASE_DOMAIN} {
 	tls {
-		dns route53
+		dns route53 {
+			hosted_zone_id Z0201401771FCP0UVU1L
+			wait_for_route53_sync true
+			route53_max_wait 2m
+		}
 	}
 
 	@metrics path /metrics
