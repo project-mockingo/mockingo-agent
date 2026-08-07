@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,15 +18,19 @@ import (
 	"github.com/mockingo/mockingo-cli/internal/agent"
 	"github.com/mockingo/mockingo-cli/internal/config"
 	"github.com/mockingo/mockingo-cli/internal/naming"
+	"github.com/mockingo/mockingo-cli/internal/oauth"
 	"github.com/mockingo/mockingo-cli/internal/process"
 	"github.com/mockingo/mockingo-cli/internal/readiness"
 )
 
 type App struct {
-	Stdin      io.Reader
-	Stdout     io.Writer
-	Stderr     io.Writer
-	ConfigPath string
+	Stdin       io.Reader
+	Stdout      io.Writer
+	Stderr      io.Writer
+	ConfigPath  string
+	HTTPClient  *http.Client
+	Credentials oauth.CredentialStore
+	OpenBrowser func(string) error
 }
 
 func New() *App { return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} }
@@ -41,7 +44,11 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	var code int
 	switch args[0] {
 	case "login":
-		err = a.login(args[1:])
+		err = a.login(ctx, args[1:])
+	case "whoami":
+		err = a.whoami(ctx, args[1:])
+	case "logout":
+		err = a.logout(ctx, args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
 	case "endpoints":
@@ -64,11 +71,14 @@ func (a *App) Run(ctx context.Context, args []string) int {
 
 func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "Usage:")
-	fmt.Fprintln(a.Stdout, "  mockingo login --api-url URL --token TOKEN")
+	fmt.Fprintln(a.Stdout, "  mockingo login [--api-url URL] [--issuer URL] [--callback-port PORT]")
+	fmt.Fprintln(a.Stdout, "  mockingo login --api-url URL --token TOKEN  # deprecated legacy gateway login")
+	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
+	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "  mockingo endpoints list [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo endpoints delete NAME [--force]")
-	fmt.Fprintln(a.Stdout, "\nLogin saves an API token. Browser-based authentication is planned for a later stage.")
+	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
 
 func (a *App) path() (string, error) {
@@ -76,32 +86,6 @@ func (a *App) path() (string, error) {
 		return a.ConfigPath, nil
 	}
 	return config.Path()
-}
-
-func (a *App) login(args []string) error {
-	set := flag.NewFlagSet("login", flag.ContinueOnError)
-	set.SetOutput(a.Stderr)
-	apiURL := set.String("api-url", "", "gateway API URL")
-	token := set.String("token", "", "gateway management API token")
-	if err := set.Parse(args); err != nil {
-		return fmt.Errorf("invalid arguments: %w", err)
-	}
-	if set.NArg() != 0 || *apiURL == "" || *token == "" {
-		return errors.New("invalid arguments: --api-url and --token are required")
-	}
-	parsed, err := url.ParseRequestURI(*apiURL)
-	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("configuration error: --api-url must be an http or https URL without credentials")
-	}
-	path, err := a.path()
-	if err != nil {
-		return fmt.Errorf("configuration error: %w", err)
-	}
-	if err := config.Save(path, config.Config{APIURL: strings.TrimRight(*apiURL, "/"), Token: *token}); err != nil {
-		return fmt.Errorf("configuration error: %w", err)
-	}
-	fmt.Fprintf(a.Stdout, "Configuration saved to %s\n", path)
-	return nil
 }
 
 func (a *App) expose(ctx context.Context, args []string) (int, error) {
@@ -130,6 +114,10 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return 1, fmt.Errorf("configuration error: %w", err)
+	}
+	legacyAPIURL, legacyToken, ok := cfg.Legacy()
+	if !ok {
+		return 1, errors.New("legacy gateway credentials are not configured; tunnel-ticket integration is deferred, so run 'mockingo login --api-url URL --token TOKEN'")
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -185,7 +173,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	fmt.Fprintln(a.Stdout, "Application is ready.")
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	registration, err := agent.Register(runCtx, httpClient, cfg.APIURL, cfg.Token, options.Name, options.HTTPPort)
+	registration, err := agent.Register(runCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
 	if err != nil {
 		return 1, fmt.Errorf("gateway registration failure: %w", err)
 	}
@@ -200,7 +188,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
 		OnState: state, Verbose: verbose, PublicURL: registration.PublicURL,
 		Reregister: func(registerCtx context.Context) (agent.Registration, error) {
-			return agent.Register(registerCtx, httpClient, cfg.APIURL, cfg.Token, options.Name, options.HTTPPort)
+			return agent.Register(registerCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
 		},
 	})
 	agentDone := make(chan error, 1)
@@ -247,6 +235,10 @@ func (a *App) endpoints(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("configuration error: %w", err)
 	}
+	legacyAPIURL, legacyToken, ok := cfg.Legacy()
+	if !ok {
+		return 1, errors.New("legacy gateway credentials are not configured; endpoint ticket integration is deferred")
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	switch args[0] {
 	case "list":
@@ -256,7 +248,7 @@ func (a *App) endpoints(ctx context.Context, args []string) (int, error) {
 		if err := set.Parse(args[1:]); err != nil || set.NArg() != 0 {
 			return 2, errors.New("invalid arguments for endpoints list")
 		}
-		values, err := agent.ListEndpoints(ctx, client, cfg.APIURL, cfg.Token)
+		values, err := agent.ListEndpoints(ctx, client, legacyAPIURL, legacyToken)
 		if err != nil {
 			return 1, err
 		}
@@ -303,7 +295,7 @@ func (a *App) endpoints(ctx context.Context, args []string) (int, error) {
 				return 1, errors.New("deletion cancelled")
 			}
 		}
-		if err := agent.DeleteEndpoint(ctx, client, cfg.APIURL, cfg.Token, name); err != nil {
+		if err := agent.DeleteEndpoint(ctx, client, legacyAPIURL, legacyToken, name); err != nil {
 			return 1, err
 		}
 		fmt.Fprintf(a.Stdout, "Endpoint %s deleted.\n", name)
