@@ -13,6 +13,8 @@ import (
 	"github.com/mockingo/mockingo-cli/internal/database"
 	"github.com/mockingo/mockingo-cli/internal/endpoint"
 	"github.com/mockingo/mockingo-cli/internal/gateway"
+	"github.com/mockingo/mockingo-cli/internal/gateway/backendcallback"
+	"github.com/mockingo/mockingo-cli/internal/gateway/ticketauth"
 	"github.com/mockingo/mockingo-cli/internal/gatewayconfig"
 )
 
@@ -100,10 +102,53 @@ func run() error {
 		return err
 	}
 	defer repository.Close()
+	metrics := gateway.NewMetrics()
+	var verifier *ticketauth.Verifier
+	var jwksCache *ticketauth.JWKSCache
+	var callbackClient backendcallback.BackendCallbackClient = backendcallback.NoOpClient{}
+	if config.TicketAuthEnabled {
+		jwksHTTPClient := &http.Client{
+			Timeout:       config.JWKSHTTPTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+		jwksCache = ticketauth.NewJWKSCache(ticketauth.JWKSConfig{
+			URL: config.BackendJWKSURL, HTTPClient: jwksHTTPClient,
+			RefreshInterval: config.JWKSRefreshInterval, OnRefresh: metrics.ObserveJWKSRefresh,
+		})
+		loadCtx, loadCancel := context.WithTimeout(ctx, config.JWKSHTTPTimeout)
+		err = jwksCache.Load(loadCtx)
+		loadCancel()
+		if err != nil {
+			return errors.New("load tunnel ticket JWKS: " + err.Error())
+		}
+		jwksCache.Start(ctx)
+		defer jwksCache.Close()
+		verifier = ticketauth.NewVerifier(ticketauth.Config{
+			Issuer: config.TicketIssuer, Audience: config.TicketAudience,
+			ProtocolVersion: config.TunnelProtocolVersion, ClockSkew: config.TicketClockSkew,
+			Keys: jwksCache, ReplayMax: config.ReplayCacheMaxEntries,
+			OnValidation: metrics.ObserveTicketValidation, OnReplay: metrics.ObserveTicketReplay,
+		})
+		verifier.StartReplayCleanup(ctx, time.Minute)
+		defer verifier.Close()
+		callbackHTTPClient := &http.Client{
+			Timeout:       config.BackendCallbackTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+		callbackClient = backendcallback.NewHTTPClient(backendcallback.Config{
+			BackendURL: config.BackendURL, Token: config.BackendCallbackToken,
+			HTTPClient: callbackHTTPClient, Attempts: config.BackendCallbackAttempts,
+			InitialBackoff: config.BackendCallbackBackoff, OnResult: metrics.ObserveCallback,
+		})
+	}
 	handler := gateway.NewServer(gateway.Config{
-		BaseDomain: config.BaseDomain, PublicScheme: config.PublicScheme, APIPublicURL: config.APIPublicURL,
+		BaseDomain: config.BaseDomain, GatewayHost: config.GatewayHost, PublicScheme: config.PublicScheme, APIPublicURL: config.APIPublicURL,
 		APIToken: config.APIToken, Repository: repository, TrustedProxyCIDRs: trusted, ReadyCheck: readyCheck,
-		MetricsEnabled: config.MetricsEnabled, Logger: logger,
+		MetricsEnabled: config.MetricsEnabled, Metrics: metrics, Logger: logger,
+		LegacyTunnelAuthEnabled: config.LegacyTunnelAuthEnabled, TicketVerifier: verifier,
+		CallbackClient: callbackClient, GatewayInternalToken: config.GatewayInternalToken,
+		GatewayInstanceID: config.GatewayInstanceID, InternalStatusMaxBatch: config.InternalStatusMaxBatch,
+		BackendCallbackBudget: callbackBudget(config.BackendCallbackTimeout, config.BackendCallbackBackoff, config.BackendCallbackAttempts),
 	})
 	server := &http.Server{Addr: config.Address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	serveError := make(chan error, 1)
@@ -127,4 +172,12 @@ func run() error {
 	_ = handler.Shutdown(shutdownCtx)
 	logger.Info("gateway stopped")
 	return nil
+}
+
+func callbackBudget(timeout, backoff time.Duration, attempts int) time.Duration {
+	budget := timeout * time.Duration(attempts)
+	for attempt := 0; attempt+1 < attempts; attempt++ {
+		budget += (backoff << attempt) * 2
+	}
+	return budget
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/mockingo/mockingo-cli/pkg/tunnelprotocol"
@@ -30,6 +31,16 @@ func newConnection(ws *websocket.Conn) *connection {
 func (c *connection) close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
+		_ = c.ws.Close()
+	})
+}
+
+func (c *connection) closeGracefully(reason string) {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		c.writeMu.Lock()
+		_ = c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, reason), time.Now().Add(time.Second))
+		c.writeMu.Unlock()
 		_ = c.ws.Close()
 	})
 }

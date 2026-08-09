@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.23 or newer
+- Go 1.25 or newer
 - `make` is optional; every Make target maps to a documented Go command
 - Any local HTTP server for manual testing
 
@@ -29,6 +29,7 @@ MOCKINGO_PUBLIC_SCHEME=http \
 MOCKINGO_ENV=development \
 MOCKINGO_API_PUBLIC_URL=http://localhost:9090 \
 MOCKINGO_DEV_TOKEN=development-token \
+MOCKINGO_TICKET_AUTH_ENABLED=false \
 go run ./cmd/mockingo-gateway
 ```
 
@@ -70,3 +71,6 @@ Stop the CLI with Ctrl+C. If it started the application, it also terminates the 
 | `MOCKINGO_DEV_TOKEN` | none | Development-only API bearer token |
 | `DATABASE_URL` | none in development | Optional PostgreSQL persistence; required in production |
 | `MOCKINGO_PUBLIC_SCHEME` | `https` | Public URL and forwarded scheme |
+| `MOCKINGO_TICKET_AUTH_ENABLED` | `true` | Enable backend ticket validation; set false for a legacy-only local demo |
+
+For a real-backend ticket test, start PostgreSQL and `mockingo-backend`, configure the backend's gateway connect URL as `ws://localhost:9090/v1/connect`, then run the gateway with development HTTP URLs, the fake/local JWKS URL, matching issuer/audience, callback token, internal token, and a stable instance ID. Authenticate to the backend, call `POST /api/v1/tunnel-sessions`, and use a temporary WebSocket client with `Authorization: Bearer <ticket>`. Verify the backend session and endpoint become connected, query the gateway batch status API, disconnect through the backend or gateway internal API, verify the disconnected/offline state, then test ticket reuse and a signing-key rotation. The current CLI remains on the legacy path and is verified separately.

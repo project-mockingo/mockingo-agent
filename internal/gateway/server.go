@@ -12,28 +12,40 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/mockingo/mockingo-cli/internal/auth"
 	"github.com/mockingo/mockingo-cli/internal/endpoint"
+	"github.com/mockingo/mockingo-cli/internal/gateway/backendcallback"
+	"github.com/mockingo/mockingo-cli/internal/gateway/ticketauth"
 	"github.com/mockingo/mockingo-cli/internal/naming"
 	"github.com/mockingo/mockingo-cli/pkg/tunnelprotocol"
 )
 
 type Config struct {
-	BaseDomain        string
-	PublicScheme      string
-	APIPublicURL      string
-	APIToken          string
-	DevToken          string
-	RequestTimeout    time.Duration
-	Repository        endpoint.Repository
-	TrustedProxyCIDRs []*net.IPNet
-	ReadyCheck        func(context.Context) error
-	MetricsEnabled    bool
-	Logger            *slog.Logger
+	BaseDomain              string
+	GatewayHost             string
+	PublicScheme            string
+	APIPublicURL            string
+	APIToken                string
+	DevToken                string
+	RequestTimeout          time.Duration
+	Repository              endpoint.Repository
+	TrustedProxyCIDRs       []*net.IPNet
+	ReadyCheck              func(context.Context) error
+	MetricsEnabled          bool
+	Metrics                 *Metrics
+	LegacyTunnelAuthEnabled bool
+	TicketVerifier          *ticketauth.Verifier
+	CallbackClient          backendcallback.BackendCallbackClient
+	GatewayInternalToken    string
+	GatewayInstanceID       string
+	InternalStatusMaxBatch  int
+	BackendCallbackBudget   time.Duration
+	Logger                  *slog.Logger
 }
 
 type Server struct {
@@ -42,7 +54,9 @@ type Server struct {
 	store        *Store
 	upgrader     websocket.Upgrader
 	shuttingDown atomic.Bool
-	metrics      metrics
+	metrics      *Metrics
+	callbackWG   sync.WaitGroup
+	tunnelWG     sync.WaitGroup
 }
 
 type statusWriter struct {
@@ -92,8 +106,25 @@ func NewServer(config Config) *Server {
 	if config.APIToken == "" {
 		config.APIToken = config.DevToken
 	}
+	if config.CallbackClient == nil {
+		config.CallbackClient = backendcallback.NoOpClient{}
+	}
+	if config.InternalStatusMaxBatch <= 0 {
+		config.InternalStatusMaxBatch = 500
+	}
+	if config.BackendCallbackBudget <= 0 {
+		config.BackendCallbackBudget = 15 * time.Second
+	}
+	if config.Metrics == nil {
+		config.Metrics = NewMetrics()
+	}
+	// Existing direct constructors predate the compatibility switch. A dev
+	// token means they are intentionally exercising the legacy flow.
+	if !config.LegacyTunnelAuthEnabled && config.TicketVerifier == nil && config.APIToken != "" {
+		config.LegacyTunnelAuthEnabled = true
+	}
 	return &Server{
-		config: config, repository: config.Repository, store: NewStore(),
+		config: config, repository: config.Repository, store: NewStore(), metrics: config.Metrics,
 		upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" }},
 	}
 }
@@ -114,6 +145,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	requestID, _ := randomHex(12)
+	w.Header().Set("X-Request-ID", requestID)
 	recorder := &statusWriter{ResponseWriter: w}
 	w = recorder
 	defer func() {
@@ -127,7 +159,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		endpointName, _, _ := ParseEndpointHost(r.Host, s.config.BaseDomain)
 		s.config.Logger.Info("http request", "request_id", requestID, "method", r.Method, "host", r.Host, "path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "endpoint_name", endpointName, "remote_ip", clientIP)
 	}()
+	_, _, publicHostErr := ParseEndpointHost(r.Host, s.config.BaseDomain)
+	isPublicHost := publicHostErr == nil
 	switch {
+	case strings.HasPrefix(r.URL.Path, "/internal/") && !isPublicHost:
+		s.handleInternal(w, r)
+	case r.URL.Path == "/v1/connect" && !isPublicHost:
+		s.handleTicketConnect(w, r, requestID)
 	case r.URL.Path == "/health/live":
 		writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 	case r.URL.Path == "/health/ready":
@@ -180,6 +218,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, apiError{Code: "gateway_unavailable", Message: "The gateway is shutting down."})
 		return
 	}
+	if !s.config.LegacyTunnelAuthEnabled {
+		writeJSON(w, http.StatusForbidden, apiError{Code: "legacy_tunnel_auth_disabled", Message: "Legacy tunnel authentication is disabled."})
+		return
+	}
 	if !s.requireAPIAuth(w, r) {
 		return
 	}
@@ -222,14 +264,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if apiPublicURL == "" {
 		apiPublicURL = s.config.PublicScheme + "://" + r.Host
 	}
-	connectURL, err := tunnelConnectURL(apiPublicURL, tunnel.ID)
+	connectURL, err := tunnelConnectURL(apiPublicURL, tunnel.SessionID)
 	if err != nil {
-		s.store.DeleteSession(tunnel.ID)
+		s.store.DeleteSession(tunnel.SessionID)
 		s.registrationError(w, http.StatusInternalServerError, "internal_error", "Gateway public URL is invalid.")
 		return
 	}
 	writeJSON(w, http.StatusCreated, createResponse{
-		ID: tunnel.ID, EndpointID: value.ID, Name: value.Name, Hostname: value.Hostname,
+		ID: tunnel.SessionID, EndpointID: value.ID, Name: value.Name, Hostname: value.Hostname,
 		PublicURL: s.config.PublicScheme + "://" + value.Hostname, ConnectURL: connectURL, SessionToken: token,
 	})
 }
@@ -305,6 +347,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, id string
 		writeJSON(w, http.StatusServiceUnavailable, apiError{Code: "gateway_unavailable", Message: "The gateway is shutting down."})
 		return
 	}
+	if !s.config.LegacyTunnelAuthEnabled {
+		writeJSON(w, http.StatusForbidden, apiError{Code: "legacy_tunnel_auth_disabled", Message: "Legacy tunnel authentication is disabled."})
+		return
+	}
 	if err := s.store.AuthenticateSession(id, r.Header.Get("Authorization")); err != nil {
 		writeJSON(w, http.StatusUnauthorized, apiError{Code: "invalid_session", Message: "Invalid or expired tunnel session."})
 		return
@@ -322,11 +368,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, id string
 	if reconnected {
 		s.metrics.reconnects.Add(1)
 	}
-	s.config.Logger.Info("tunnel connected", "tunnel_session_id", id)
+	s.metrics.tunnelConnected(string(TunnelAuthLegacy))
+	s.tunnelWG.Add(1)
+	defer s.tunnelWG.Done()
+	s.config.Logger.Warn("legacy tunnel authentication is deprecated", "sessionId", id, "authMethod", TunnelAuthLegacy)
 	defer func() {
 		conn.close()
 		s.store.Disconnect(id, conn)
-		s.config.Logger.Info("tunnel disconnected", "tunnel_session_id", id)
+		s.config.Logger.Info("tunnel disconnected", "sessionId", id, "authMethod", TunnelAuthLegacy)
 	}()
 	_ = conn.readLoop()
 }
@@ -419,14 +468,22 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, apiError{Code: "request_too_large", Message: "The request body exceeds the 10 MiB limit."})
 		return
 	}
-	value, err := s.repository.GetEndpointByHostname(r.Context(), hostname)
-	if errors.Is(err, endpoint.ErrNotFound) {
-		writeJSON(w, http.StatusNotFound, apiError{Code: "endpoint_not_found", Message: "No Mockingo endpoint is registered for this hostname."})
-		return
-	}
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, apiError{Code: "database_unavailable", Message: "Endpoint storage is unavailable."})
-		return
+	conn := s.store.ConnectionByHostname(hostname)
+	if conn == nil {
+		value, lookupErr := s.repository.GetEndpointByHostname(r.Context(), hostname)
+		if errors.Is(lookupErr, endpoint.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, apiError{Code: "endpoint_not_found", Message: "No Mockingo endpoint is registered for this hostname."})
+			return
+		}
+		if lookupErr != nil {
+			writeJSON(w, http.StatusServiceUnavailable, apiError{Code: "database_unavailable", Message: "Endpoint storage is unavailable."})
+			return
+		}
+		conn = s.store.ConnectionByEndpoint(value.ID)
+		if conn == nil {
+			writeJSON(w, http.StatusBadGateway, apiError{Code: "tunnel_offline", Message: "The Mockingo endpoint is currently offline."})
+			return
+		}
 	}
 	defer r.Body.Close()
 	body, err := tunnelprotocol.ReadBody(r.Body)
@@ -436,11 +493,6 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Code: "bad_request", Message: "Could not read the request."})
-		return
-	}
-	conn := s.store.ConnectionByEndpoint(value.ID)
-	if conn == nil {
-		writeJSON(w, http.StatusBadGateway, apiError{Code: "tunnel_offline", Message: "The Mockingo endpoint is currently offline."})
 		return
 	}
 	headers := tunnelprotocol.FilterHeaders(r.Header)
@@ -508,6 +560,9 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if err == nil && s.config.ReadyCheck != nil {
 		err = s.config.ReadyCheck(ctx)
 	}
+	if err == nil && s.config.TicketVerifier != nil && !s.config.TicketVerifier.Ready() {
+		err = errors.New("ticket verifier has no usable keys")
+	}
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
 		return
@@ -526,12 +581,27 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) BeginShutdown() {
-	s.shuttingDown.Store(true)
-	s.store.CloseAll()
+	if s.shuttingDown.Swap(true) {
+		return
+	}
+	for _, conn := range s.store.CloseAll(DisconnectGatewayShutdown) {
+		conn.closeGracefully(DisconnectGatewayShutdown)
+	}
 }
 
-func (s *Server) Shutdown(context.Context) error {
+func (s *Server) Shutdown(ctx context.Context) error {
 	s.BeginShutdown()
+	done := make(chan struct{})
+	go func() {
+		s.tunnelWG.Wait()
+		s.callbackWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	s.repository.Close()
 	return nil
 }

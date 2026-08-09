@@ -25,15 +25,16 @@ func accountLock(account string) *sync.Mutex {
 }
 
 type Client struct {
-	HTTP       *http.Client
-	APIURL     string
-	Issuer     string
-	ClientID   string
-	Scopes     []string
-	Metadata   oauth.Metadata
-	Store      oauth.CredentialStore
-	ExpirySkew time.Duration
-	Now        func() time.Time
+	HTTP         *http.Client
+	APIURL       string
+	Issuer       string
+	ClientID     string
+	Scopes       []string
+	Metadata     oauth.Metadata
+	Store        oauth.CredentialStore
+	ExpirySkew   time.Duration
+	Now          func() time.Time
+	defaultsOnce sync.Once
 }
 
 type Me struct {
@@ -44,15 +45,17 @@ type Me struct {
 var ErrSignedOut = errors.New("Your Mockingo session has expired.\nRun: mockingo login")
 
 func (c *Client) defaults() {
-	if c.HTTP == nil {
-		c.HTTP = &http.Client{Timeout: 30 * time.Second}
-	}
-	if c.ExpirySkew == 0 {
-		c.ExpirySkew = time.Minute
-	}
-	if c.Now == nil {
-		c.Now = time.Now
-	}
+	c.defaultsOnce.Do(func() {
+		if c.HTTP == nil {
+			c.HTTP = &http.Client{Timeout: 30 * time.Second}
+		}
+		if c.ExpirySkew == 0 {
+			c.ExpirySkew = time.Minute
+		}
+		if c.Now == nil {
+			c.Now = time.Now
+		}
+	})
 }
 
 func (c *Client) credentials(ctx context.Context, forceRefresh bool) (oauth.OAuthCredentials, error) {

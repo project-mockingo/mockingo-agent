@@ -1,8 +1,10 @@
-# Stage 2A security model
+# Gateway security model
 
 Stage 2A is a single-owner service. Every management call uses `Authorization: Bearer <MOCKINGO_API_TOKEN>`. Production rejects missing, short, default, or obvious example tokens. The development token is considered only when `MOCKINGO_ENV=development` or `MOCKINGO_ALLOW_DEV_TOKEN=true`. Token comparisons use constant-time hash comparison.
 
 Management and tunnel credentials are separate. A tunnel session token is 256 bits of cryptographic randomness, returned once, transmitted only in a WebSocket authorization header, and held only as a SHA-256 hash in gateway memory. Tokens never appear in URLs. Endpoint rows contain no credentials.
+
+Stage 3E.1 also accepts short-lived backend-issued RS256 tickets at `/v1/connect`. It restricts the algorithm, verifies `kid` against cached public RSA JWKS, validates issuer/audience/time and endpoint/session/protocol claims, and consumes `jti` in a bounded replay cache. The gateway never receives a ticket signing private key. Ticket, backend callback, backend-to-gateway internal, Clerk, and legacy credentials are separate and are not interchangeable.
 
 The gateway emits structured logs with method, host, URL path (never query parameters), status, duration, and peer IP. It does not log authorization headers, cookies, bodies, database URLs, AWS secrets, management tokens, or session tokens. Generated JSON errors use `application/json`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`.
 

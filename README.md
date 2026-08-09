@@ -10,7 +10,7 @@ Internet client -> HTTPS Caddy -> Mockingo Gateway -> WSS CLI -> 127.0.0.1:8080
 
 ## Build and test
 
-Go 1.23 or newer is required.
+Go 1.25 or newer is required.
 
 ```bash
 make build
@@ -102,6 +102,7 @@ export MOCKINGO_BASE_DOMAIN=localhost
 export MOCKINGO_PUBLIC_SCHEME=http
 export MOCKINGO_API_PUBLIC_URL=http://localhost:9090
 export MOCKINGO_DEV_TOKEN=development-token
+export MOCKINGO_TICKET_AUTH_ENABLED=false
 go run ./cmd/mockingo-gateway
 ```
 
@@ -119,6 +120,8 @@ Development mode uses an in-memory endpoint repository when `DATABASE_URL` is ab
 
 The production stack is in `deploy/` and contains PostgreSQL, the gateway, and a custom Caddy build with the Route 53 DNS module. Only Caddy publishes ports. Start with [deploy/README.md](deploy/README.md), then read [production deployment](docs/production-deployment.md), [Route 53 DNS](docs/route53-dns.md), and [security](docs/security.md).
 
+Gateway integration references: [tunnel ticket authentication](docs/tunnel-ticket-auth.md), [gateway internal API](docs/gateway-internal-api.md), and [backend callbacks](docs/backend-callbacks.md).
+
 ## Manual OAuth verification
 
 1. Configure the Clerk public OAuth application and exact loopback redirect URI above.
@@ -130,4 +133,4 @@ The production stack is in `deploy/` and contains PostgreSQL, the gateway, and a
 
 ## Current limits
 
-Protocol v1 buffers request and response bodies and caps each at 10 MiB. It supports concurrent HTTP request multiplexing, but not streaming, SSE, application WebSocket proxying, TCP/UDP forwarding, remote folders, container execution, or a dashboard. OAuth currently covers CLI login state and authenticated control-plane access only; `expose` still uses the explicitly configured deprecated static gateway token until backend-issued tunnel tickets are implemented.
+Protocol v1 buffers request and response bodies and caps each at 10 MiB. It supports concurrent HTTP request multiplexing, but not streaming, SSE, application WebSocket proxying, TCP/UDP forwarding, remote folders, container execution, or a dashboard. The gateway now accepts backend-issued tunnel tickets, but `expose` still uses the explicitly configured deprecated static gateway flow until Stage 3E.2 migrates ticket acquisition and reconnect renewal.
