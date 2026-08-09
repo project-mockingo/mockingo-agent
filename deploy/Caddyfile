@@ -2,7 +2,7 @@
 	email {$ACME_EMAIL}
 }
 
-{$MOCKINGO_GATEWAY_HOST}, *.{$MOCKINGO_BASE_DOMAIN} {
+{$MOCKINGO_GATEWAY_HOST} {
 	tls {
 		dns route53 {
 			wait_for_route53_sync true
@@ -10,11 +10,24 @@
 		}
 	}
 
-	@metrics path /metrics
-	respond @metrics 404
+	@data_plane path /v1/connect /internal/* /health/live /health/ready
+	handle @data_plane {
+		reverse_proxy mockingo-gateway:9090 {
+			header_up Host {host}
+		}
+	}
+	handle {
+		respond 404
+	}
+}
 
-	# Caddy preserves WebSocket upgrade headers. Token authentication remains
-	# mandatory for /internal/* even if a firewall also restricts this host.
+*.{$MOCKINGO_BASE_DOMAIN} {
+	tls {
+		dns route53 {
+			wait_for_route53_sync true
+			route53_max_wait 2m
+		}
+	}
 	reverse_proxy mockingo-gateway:9090 {
 		header_up Host {host}
 	}

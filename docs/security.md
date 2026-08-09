@@ -1,15 +1,18 @@
-# Gateway security model
+# Security
 
-Stage 2A is a single-owner service. Every management call uses `Authorization: Bearer <MOCKINGO_API_TOKEN>`. Production rejects missing, short, default, or obvious example tokens. The development token is considered only when `MOCKINGO_ENV=development` or `MOCKINGO_ALLOW_DEV_TOKEN=true`. Token comparisons use constant-time hash comparison.
+User authentication is Clerk OAuth Authorization Code Flow with PKCE. OAuth access tokens are sent only to Spring Boot. Tunnel tickets are backend-issued RS256 JWTs sent only to the validated gateway `/v1/connect` URL and consumed once. The gateway restricts algorithm and `kid`, caches public JWKS, and validates issuer, audience, time, endpoint/session claims, protocol, and replay state.
 
-Management and tunnel credentials are separate. A tunnel session token is 256 bits of cryptographic randomness, returned once, transmitted only in a WebSocket authorization header, and held only as a SHA-256 hash in gateway memory. Tokens never appear in URLs. Endpoint rows contain no credentials.
+Two service credentials remain intentionally separate:
 
-Stage 3E.1 also accepts short-lived backend-issued RS256 tickets at `/v1/connect`. It restricts the algorithm, verifies `kid` against cached public RSA JWKS, validates issuer/audience/time and endpoint/session/protocol claims, and consumes `jti` in a bounded replay cache. The gateway never receives a ticket signing private key. Ticket, backend callback, backend-to-gateway internal, Clerk, and legacy credentials are separate and are not interchangeable.
+- `MOCKINGO_GATEWAY_INTERNAL_TOKEN`: Spring Boot authenticates to gateway internal APIs.
+- `MOCKINGO_BACKEND_CALLBACK_TOKEN`: the gateway authenticates lifecycle callbacks to Spring Boot.
 
-The gateway emits structured logs with method, host, URL path (never query parameters), status, duration, and peer IP. It does not log authorization headers, cookies, bodies, database URLs, AWS secrets, management tokens, or session tokens. Generated JSON errors use `application/json`, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`.
+Both use exact Bearer syntax. Internal-token comparison is constant-time. Neither credential is accepted as a user credential or tunnel ticket.
 
-Host routing accepts exactly one ASCII label under `MOCKINGO_BASE_DOMAIN`. It strips a syntactically valid optional port and rejects IPs, root domains, nested subdomains, internationalized names, malformed hosts, and reserved names such as `api`. Database unique constraints are authoritative for concurrent reservations.
+Gateway logs include safe request/session identifiers and never authorization headers, OAuth tokens, tickets, service credentials, database URLs, cookies, or bodies. Errors use JSON, `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`.
 
-Caddy is the only publicly published service. PostgreSQL and the gateway are reachable only on the internal Docker network. The gateway ignores caller-provided `Forwarded` and `X-Forwarded-*` headers unless its immediate peer belongs to `MOCKINGO_TRUSTED_PROXY_CIDRS`; it then propagates only sanitized values. Caddy preserves the original `Host` and handles HTTPS/WSS.
+The gateway database role is read-only and limited to endpoint hostname existence. Spring Boot owns all schema migrations and writes.
 
-The CLI config directory and file use restrictive permissions (`0700` and `0600` on Unix). Protect the production server, `.env`, PostgreSQL backups, Caddy state, and the API token with normal host hardening and secret rotation practices. Deleting an endpoint closes its active socket, invalidates its temporary session, and removes the database row; disconnecting alone never deletes it.
+## Removed legacy authentication
+
+Static management/API tokens, gateway-issued session secrets, direct tunnel registration, and gateway endpoint CRUD are removed from normal builds and configuration. Old public routes return `404`; a static value presented to `/v1/connect` receives the same generic `invalid_tunnel_ticket` response as any invalid ticket.

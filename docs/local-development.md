@@ -1,76 +1,31 @@
 # Local development
 
-## Prerequisites
+Run PostgreSQL and the sibling Spring Boot backend first. The backend owns Flyway and creates endpoint/tunnel-session data. Give the gateway the same database with a SELECT-only role, backend/JWKS URLs, ticket issuer/audience, and distinct callback/internal tokens.
 
-- Go 1.25 or newer
-- `make` is optional; every Make target maps to a documented Go command
-- Any local HTTP server for manual testing
+Example gateway environment:
 
-## Automated verification
-
-```bash
-go mod download
-go fmt ./...
-go vet ./...
-go test ./...
-go build ./cmd/mockingo
-go build ./cmd/mockingo-gateway
+```text
+MOCKINGO_ENV=development
+MOCKINGO_GATEWAY_ADDR=:9090
+MOCKINGO_BASE_DOMAIN=localhost
+MOCKINGO_GATEWAY_HOST=localhost
+MOCKINGO_PUBLIC_SCHEME=http
+MOCKINGO_BACKEND_URL=http://localhost:8080
+MOCKINGO_BACKEND_JWKS_URL=http://localhost:8080/.well-known/mockingo-tunnel-jwks.json
+MOCKINGO_TUNNEL_TICKET_ISSUER=http://localhost:8080
+MOCKINGO_TUNNEL_TICKET_AUDIENCE=mockingo-gateway
+MOCKINGO_BACKEND_CALLBACK_TOKEN=test-only-callback-token
+MOCKINGO_GATEWAY_INTERNAL_TOKEN=test-only-internal-token
+MOCKINGO_GATEWAY_INSTANCE_ID=gateway-local
+DATABASE_URL=postgres://mockingo_gateway_reader:password@localhost:5432/mockingo?sslmode=disable
 ```
 
-The integration test creates random local listeners, runs the gateway and agent in process, forwards concurrent HTTP requests, and verifies the disconnected `502` state.
-
-## Complete local demo
-
-Terminal 1, the gateway:
+Then run:
 
 ```bash
-MOCKINGO_BASE_DOMAIN=localhost \
-MOCKINGO_PUBLIC_SCHEME=http \
-MOCKINGO_ENV=development \
-MOCKINGO_API_PUBLIC_URL=http://localhost:9090 \
-MOCKINGO_DEV_TOKEN=development-token \
-MOCKINGO_TICKET_AUTH_ENABLED=false \
-go run ./cmd/mockingo-gateway
+go run ./cmd/mockingo-gateway serve
+go run ./cmd/mockingo login
+go run ./cmd/mockingo expose --expected-gateway-host localhost --allow-insecure-gateway --name spring-demo --http 8080
 ```
 
-Terminal 2, save credentials and expose an existing service:
-
-```bash
-go run ./cmd/mockingo login \
-  --api-url http://localhost:9090 \
-  --token development-token
-
-go run ./cmd/mockingo expose --legacy --name demo --http 8080
-```
-
-Or let Mockingo start the application:
-
-```bash
-go run ./cmd/mockingo expose --legacy \
-  --name spring-demo \
-  --http 8080 \
-  -- java -jar target/application.jar
-```
-
-Terminal 3, issue a public-side request through the local gateway:
-
-```bash
-curl -i -H "Host: demo.localhost" http://localhost:9090/hello?value=1
-```
-
-Stop the CLI with Ctrl+C. If it started the application, it also terminates the child process tree. If the gateway briefly disappears, leave the CLI running; it reconnects with exponential backoff while keeping the same hostname.
-
-## Gateway environment
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MOCKINGO_GATEWAY_ADDR` | `:9090` | Listen address |
-| `MOCKINGO_BASE_DOMAIN` | `mockingo.click` | Hostname routing suffix |
-| `MOCKINGO_ENV` | `production` | Must be `development` to allow the development token |
-| `MOCKINGO_API_PUBLIC_URL` | derived from domain | URL used to construct the WebSocket connection URL |
-| `MOCKINGO_DEV_TOKEN` | none | Development-only API bearer token |
-| `DATABASE_URL` | none in development | Optional PostgreSQL persistence; required in production |
-| `MOCKINGO_PUBLIC_SCHEME` | `https` | Public URL and forwarded scheme |
-| `MOCKINGO_TICKET_AUTH_ENABLED` | `true` | Enable backend ticket validation; set false for a legacy-only local demo |
-
-For a real-backend ticket test, start PostgreSQL and `mockingo-backend`, configure the backend's gateway connect URL as `ws://localhost:9090/v1/connect`, then run the gateway with development HTTP URLs, the local JWKS URL, matching issuer/audience, callback token, internal token, and a stable instance ID. Sign in with `mockingo login`, then run `mockingo expose --expected-gateway-host localhost --allow-insecure-gateway --name spring-demo --http 8080`. Verify the backend session and endpoint become connected, query the gateway batch status API, disconnect through the backend or gateway internal API, and verify expose obtains a new session ID and ticket before reconnecting. The legacy demo above is intentionally explicit and deprecated.
+Reconnect requests a fresh backend tunnel session and ticket. There is no direct gateway registration or fallback authentication mode.

@@ -2,29 +2,14 @@ package endpoint
 
 import (
 	"context"
-	"errors"
-	"time"
 )
 
-var (
-	ErrNotFound = errors.New("endpoint not found")
-	ErrConflict = errors.New("endpoint already exists")
-)
-
-type Endpoint struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Hostname  string    `json:"hostname"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}
-
-type Repository interface {
-	CreateEndpoint(context.Context, Endpoint) (Endpoint, error)
-	GetEndpointByName(context.Context, string) (Endpoint, error)
-	GetEndpointByHostname(context.Context, string) (Endpoint, error)
-	ListEndpoints(context.Context) ([]Endpoint, error)
-	DeleteEndpoint(context.Context, string) error
+// Catalog is the gateway's transitional, read-only endpoint dependency. It is
+// used only to preserve public 404 endpoint_not_found versus 502 tunnel_offline
+// semantics. The gateway does not own endpoint writes, schema migrations, or
+// ownership decisions.
+type Catalog interface {
+	ExistsByHostname(context.Context, string) (bool, error)
 	Ping(context.Context) error
 	Close()
 }

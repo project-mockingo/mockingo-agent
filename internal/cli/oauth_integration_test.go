@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -113,7 +115,7 @@ func TestOAuthLoginWhoamiJSONAndLogout(t *testing.T) {
 		t.Fatalf("login code = %d\n%s", code, output.String())
 	}
 	cfg, err := config.Load(path)
-	if err != nil || cfg.UserID != "user_123" || cfg.Token != "" || cfg.LegacyToken != "" {
+	if err != nil || cfg.UserID != "user_123" {
 		t.Fatalf("config = %#v, %v", cfg, err)
 	}
 	output.Reset()
@@ -173,7 +175,7 @@ func TestBrowserFailurePrintsFallbackAndCanComplete(t *testing.T) {
 	}
 }
 
-func TestLegacyCredentialSeparation(t *testing.T) {
+func TestRemovedStaticTokenLoginIsRejectedWithoutChangingOAuth(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	expires := time.Now().Add(time.Hour)
 	existing := config.Config{APIURL: "https://api.mockingo.com", OAuthIssuer: "https://clerk.example", OAuthClientID: "client", OAuthScopes: "openid", UserID: "user_1", ExpiresAt: &expires}
@@ -182,12 +184,38 @@ func TestLegacyCredentialSeparation(t *testing.T) {
 	}
 	var output bytes.Buffer
 	app := &App{Stdout: &output, Stderr: &output, ConfigPath: path}
-	if code := app.Run(context.Background(), []string{"login", "--api-url", "https://gateway.example", "--token", "legacy-secret"}); code != 0 {
-		t.Fatalf("code = %d: %s", code, output.String())
+	if code := app.Run(context.Background(), []string{"login", "--api-url", "https://gateway.example", "--token", "test-only-static-token"}); code == 0 {
+		t.Fatalf("removed option succeeded: %s", output.String())
 	}
-	cfg, _ := config.Load(path)
-	legacyURL, token, ok := cfg.Legacy()
-	if !ok || legacyURL != "https://gateway.example" || token != "legacy-secret" || cfg.OAuthIssuer != existing.OAuthIssuer || cfg.APIURL != existing.APIURL {
-		t.Fatalf("credentials were not separated: %#v", cfg)
+	cfg, err := config.Load(path)
+	if err != nil || cfg.OAuthIssuer != existing.OAuthIssuer || cfg.OAuthClientID != existing.OAuthClientID || cfg.APIURL != existing.APIURL || cfg.UserID != existing.UserID {
+		t.Fatalf("OAuth configuration changed: %#v, %v", cfg, err)
+	}
+}
+
+func TestLogoutCleansIgnoredLegacyConfigFieldsAndPreservesAPIURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	expires := time.Now().Add(time.Hour).UTC()
+	raw := fmt.Sprintf(`{"apiUrl":"https://api.mockingo.com","oauthIssuer":"https://clerk.example","oauthClientId":"client","oauthScopes":"openid","userId":"user_1","expiresAt":%q,"token":"test-only-old-token","legacyToken":"test-only-old-token"}`, expires.Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := newCLIStore()
+	_ = store.Set(oauth.Account("https://clerk.example", "client"), oauth.OAuthCredentials{AccessToken: "access", TokenType: "Bearer", ExpiresAt: expires})
+	var output bytes.Buffer
+	app := &App{Stdout: &output, Stderr: &output, ConfigPath: path, Credentials: store}
+	if code := app.Run(context.Background(), []string{"logout"}); code != 0 {
+		t.Fatalf("logout = %d: %s", code, output.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "test-only-old-token") || strings.Contains(string(data), "legacyToken") || strings.Contains(string(data), `"token"`) {
+		t.Fatalf("removed credential remnants survived logout: %s", data)
+	}
+	cfg, err := config.Load(path)
+	if err != nil || cfg.APIURL != "https://api.mockingo.com" || cfg.OAuthIssuer != "" {
+		t.Fatalf("cleaned config = %#v, %v", cfg, err)
 	}
 }

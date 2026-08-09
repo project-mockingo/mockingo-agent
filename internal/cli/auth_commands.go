@@ -35,8 +35,6 @@ type loginOptions struct {
 	CallbackPort                                                 int
 	Timeout                                                      time.Duration
 	NoBrowser, Force, AllowFile                                  bool
-	APIURLExplicit                                               bool
-	LegacyToken                                                  string
 }
 
 func envString(name, fallback string) string {
@@ -125,15 +123,9 @@ func parseLoginOptions(args []string, existing config.Config, stderr io.Writer) 
 	set.BoolVar(&options.NoBrowser, "no-browser", false, "print the authorization URL without opening a browser")
 	set.BoolVar(&options.Force, "force", false, "authenticate again even when already signed in")
 	set.BoolVar(&options.AllowFile, "allow-insecure-storage", options.AllowFile, "allow owner-only file storage when the OS credential store is unavailable")
-	set.StringVar(&options.LegacyToken, "token", "", "deprecated static gateway token")
 	if err := set.Parse(args); err != nil {
 		return loginOptions{}, fmt.Errorf("invalid arguments: %w", err)
 	}
-	set.Visit(func(value *flag.Flag) {
-		if value.Name == "api-url" {
-			options.APIURLExplicit = true
-		}
-	})
 	if set.NArg() != 0 {
 		return loginOptions{}, errors.New("invalid arguments: login does not accept positional arguments")
 	}
@@ -169,9 +161,6 @@ func (a *App) login(ctx context.Context, args []string) error {
 	options, err := parseLoginOptions(args, existing, a.Stderr)
 	if err != nil {
 		return err
-	}
-	if options.LegacyToken != "" {
-		return a.legacyLogin(path, existing, options)
 	}
 	apiURL, err := validateAPIURL(options.APIURL)
 	if err != nil {
@@ -283,30 +272,6 @@ func (a *App) login(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *App) legacyLogin(path string, existing config.Config, options loginOptions) error {
-	if !options.APIURLExplicit {
-		return errors.New("invalid arguments: deprecated --token login also requires an explicit --api-url for the legacy gateway")
-	}
-	apiURL, err := validateAPIURL(options.APIURL)
-	if err != nil {
-		return fmt.Errorf("configuration error: %w", err)
-	}
-	if options.Issuer != "" || options.ClientID != "" {
-		// Existing OAuth configuration is fine; the two credential types stay separate.
-	}
-	existing.LegacyAPIURL = apiURL
-	existing.LegacyToken = options.LegacyToken
-	if existing.OAuthIssuer == "" {
-		existing.APIURL = ""
-	}
-	if err := config.Save(path, existing); err != nil {
-		return fmt.Errorf("configuration error: %w", err)
-	}
-	fmt.Fprintln(a.Stderr, "Warning: --token login is deprecated and will be removed after tunnel-ticket integration.")
-	fmt.Fprintf(a.Stdout, "Legacy gateway configuration saved to %s\n", path)
-	return nil
-}
-
 func (a *App) loadOAuth(ctx context.Context, path string, allowFile bool) (config.Config, oauth.Metadata, oauth.CredentialStore, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -327,7 +292,10 @@ func (a *App) whoami(ctx context.Context, args []string) error {
 	set.SetOutput(a.Stderr)
 	asJSON := set.Bool("json", false, "print JSON")
 	allowFile := set.Bool("allow-insecure-storage", strings.EqualFold(os.Getenv("MOCKINGO_ALLOW_FILE_CREDENTIALS"), "true"), "allow configured owner-only fallback credential storage")
-	if err := set.Parse(args); err != nil || set.NArg() != 0 {
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() != 0 {
 		return errors.New("invalid arguments for whoami")
 	}
 	path, err := a.path()
@@ -357,7 +325,10 @@ func (a *App) logout(ctx context.Context, args []string) error {
 	set := flag.NewFlagSet("logout", flag.ContinueOnError)
 	set.SetOutput(a.Stderr)
 	allowFile := set.Bool("allow-insecure-storage", strings.EqualFold(os.Getenv("MOCKINGO_ALLOW_FILE_CREDENTIALS"), "true"), "remove configured owner-only fallback credentials")
-	if err := set.Parse(args); err != nil || set.NArg() != 0 {
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() != 0 {
 		return errors.New("invalid arguments for logout")
 	}
 	path, err := a.path()
@@ -369,6 +340,15 @@ func (a *App) logout(ctx context.Context, args []string) error {
 		return err
 	}
 	if cfg.OAuthIssuer == "" || cfg.OAuthClientID == "" {
+		// A normal logout also rewrites old configuration into the current
+		// OAuth-only schema, dropping ignored pre-OAuth credential fields.
+		if cfg.Empty() {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove local configuration: %w", err)
+			}
+		} else if err := config.Save(path, cfg); err != nil {
+			return fmt.Errorf("clean local configuration: %w", err)
+		}
 		fmt.Fprintln(a.Stdout, "✓ Signed out of Mockingo")
 		return nil
 	}

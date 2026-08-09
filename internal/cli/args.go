@@ -26,7 +26,6 @@ type ExposeOptions struct {
 	RequestTimeout        time.Duration
 	Verbose               bool
 	Command               []string
-	Legacy                bool
 	APIURL                string
 	ExpectedGatewayHost   string
 	ProtocolVersion       int
@@ -72,10 +71,6 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	if err != nil {
 		return ExposeOptions{}, err
 	}
-	legacy, err := envBool("MOCKINGO_LEGACY_EXPOSE_ENABLED", false)
-	if err != nil {
-		return ExposeOptions{}, err
-	}
 	allowInsecure, err := envBool("MOCKINGO_ALLOW_INSECURE_GATEWAY", false)
 	if err != nil {
 		return ExposeOptions{}, err
@@ -94,7 +89,6 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	}
 	options.ProtocolVersion = protocolVersion
 	options.ReconnectEnabled = reconnectEnabled
-	options.Legacy = legacy
 	options.AllowInsecureGateway = allowInsecure
 	options.AllowFileCredentials = allowFile
 	options.ReconnectInitialDelay = initialDelay
@@ -108,7 +102,6 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	set.DurationVar(&options.StartupTimeout, "startup-timeout", 60*time.Second, "startup timeout")
 	set.DurationVar(&options.RequestTimeout, "request-timeout", 60*time.Second, "request timeout")
 	set.BoolVar(&options.Verbose, "verbose", false, "verbose diagnostics")
-	set.BoolVar(&options.Legacy, "legacy", options.Legacy, "use deprecated static gateway authentication")
 	set.StringVar(&options.APIURL, "api-url", envString("MOCKINGO_API_URL", ""), "Mockingo control-plane API URL")
 	set.StringVar(&options.ExpectedGatewayHost, "expected-gateway-host", envString("MOCKINGO_EXPECTED_GATEWAY_HOST", "gateway.mockingo.com"), "trusted gateway hostname (comma-separated)")
 	set.IntVar(&options.ProtocolVersion, "tunnel-protocol-version", options.ProtocolVersion, "tunnel protocol version")

@@ -42,8 +42,8 @@ func run() error {
 		}
 		return nil
 	}
-	if len(os.Args) > 1 && os.Args[1] != "serve" && os.Args[1] != "migrate" {
-		return errors.New("usage: mockingo-gateway [serve|migrate|healthcheck]")
+	if len(os.Args) > 1 && os.Args[1] != "serve" {
+		return errors.New("usage: mockingo-gateway [serve|healthcheck]")
 	}
 	config, err := gatewayconfig.Load()
 	if err != nil {
@@ -65,8 +65,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var repository endpoint.Repository = endpoint.NewMemoryRepository()
-	var readyCheck func(context.Context) error
+	var catalog endpoint.Catalog = endpoint.NewMemoryCatalog()
 	if config.DatabaseURL != "" {
 		databaseCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		pool, openErr := database.Open(databaseCtx, config.DatabaseURL)
@@ -74,39 +73,19 @@ func run() error {
 		if openErr != nil {
 			return openErr
 		}
-		if len(os.Args) > 1 && os.Args[1] == "migrate" {
-			defer pool.Close()
-			migrationCtx, migrationCancel := context.WithTimeout(ctx, 30*time.Second)
-			defer migrationCancel()
-			if err := database.Migrate(migrationCtx, pool); err != nil {
-				return err
-			}
-			logger.Info("database migrations applied", "version", database.RequiredVersion)
-			return nil
-		}
-		readyCtx, readyCancel := context.WithTimeout(ctx, 5*time.Second)
-		err = database.Ready(readyCtx, pool)
-		readyCancel()
-		if err != nil {
-			pool.Close()
-			return err
-		}
-		repository = endpoint.NewPostgresRepository(pool)
-		readyCheck = func(checkCtx context.Context) error { return database.Ready(checkCtx, pool) }
-	} else if len(os.Args) > 1 && os.Args[1] == "migrate" {
-		return errors.New("DATABASE_URL is required for migrations")
+		catalog = endpoint.NewPostgresCatalog(pool)
 	}
 	trusted, err := gateway.ParseTrustedProxyCIDRs(config.TrustedProxyCIDRs)
 	if err != nil {
-		repository.Close()
+		catalog.Close()
 		return err
 	}
-	defer repository.Close()
+	defer catalog.Close()
 	metrics := gateway.NewMetrics()
 	var verifier *ticketauth.Verifier
 	var jwksCache *ticketauth.JWKSCache
-	var callbackClient backendcallback.BackendCallbackClient = backendcallback.NoOpClient{}
-	if config.TicketAuthEnabled {
+	var callbackClient backendcallback.BackendCallbackClient
+	{
 		jwksHTTPClient := &http.Client{
 			Timeout:       config.JWKSHTTPTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -142,10 +121,10 @@ func run() error {
 		})
 	}
 	handler := gateway.NewServer(gateway.Config{
-		BaseDomain: config.BaseDomain, GatewayHost: config.GatewayHost, PublicScheme: config.PublicScheme, APIPublicURL: config.APIPublicURL,
-		APIToken: config.APIToken, Repository: repository, TrustedProxyCIDRs: trusted, ReadyCheck: readyCheck,
+		BaseDomain: config.BaseDomain, GatewayHost: config.GatewayHost, PublicScheme: config.PublicScheme,
+		Catalog: catalog, TrustedProxyCIDRs: trusted,
 		MetricsEnabled: config.MetricsEnabled, Metrics: metrics, Logger: logger,
-		LegacyTunnelAuthEnabled: config.LegacyTunnelAuthEnabled, TicketVerifier: verifier,
+		TicketVerifier: verifier,
 		CallbackClient: callbackClient, GatewayInternalToken: config.GatewayInternalToken,
 		GatewayInstanceID: config.GatewayInstanceID, InternalStatusMaxBatch: config.InternalStatusMaxBatch,
 		BackendCallbackBudget: callbackBudget(config.BackendCallbackTimeout, config.BackendCallbackBackoff, config.BackendCallbackAttempts),

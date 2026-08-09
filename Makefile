@@ -1,4 +1,4 @@
-.PHONY: build test test-integration fmt vet migrate docker-build compose-config compose-up compose-down cross-build clean
+.PHONY: build test fmt vet docker-build compose-config compose-up compose-down cross-build clean
 
 build:
 	mkdir -p bin
@@ -8,21 +8,15 @@ build:
 test:
 	go test ./...
 
-test-integration:
-	go test -tags=integration ./internal/integration/...
-
 fmt:
 	gofmt -w $$(find cmd internal pkg -name '*.go')
 
 vet:
 	go vet ./...
 
-migrate:
-	go run ./cmd/mockingo-gateway migrate
-
 docker-build:
-	docker build -f deploy/Dockerfile.gateway -t mockingo-gateway:stage2a .
-	docker build -f deploy/Dockerfile.caddy -t mockingo-caddy:stage2a .
+	docker build -f deploy/Dockerfile.gateway -t mockingo-gateway:latest .
+	docker build -f deploy/Dockerfile.caddy -t mockingo-caddy:latest .
 
 compose-config:
 	docker compose --env-file deploy/.env -f deploy/docker-compose.production.yml config --quiet

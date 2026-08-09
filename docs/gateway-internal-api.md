@@ -1,6 +1,6 @@
 # Gateway internal API
 
-The Spring backend calls these endpoints on `https://gateway.mockingo.com`. Every request requires exactly one `Authorization: Bearer <MOCKINGO_GATEWAY_INTERNAL_TOKEN>` header. This token is distinct from Clerk tokens, tunnel tickets, the callback token, and the legacy management token. Comparison is constant-time and failures are generic `401` responses.
+The Spring backend calls these endpoints on `https://gateway.mockingo.com`. Every request requires exactly one `Authorization: Bearer <MOCKINGO_GATEWAY_INTERNAL_TOKEN>` header. This token is distinct from Clerk tokens, tunnel tickets, and the callback token. Comparison is constant-time and failures are generic `401` responses.
 
 ## Batch status
 

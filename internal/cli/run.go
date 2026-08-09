@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/mockingo/mockingo-cli/internal/agent"
@@ -52,8 +49,6 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.logout(ctx, args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
-	case "endpoints":
-		code, err = a.endpoints(ctx, args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -61,6 +56,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = fmt.Errorf("invalid arguments: unknown command %q", args[0])
 	}
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		fmt.Fprintf(a.Stderr, "Error: %v\n", err)
 		if code != 0 {
 			return code
@@ -73,13 +71,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "Usage:")
 	fmt.Fprintln(a.Stdout, "  mockingo login [--api-url URL] [--issuer URL] [--callback-port PORT]")
-	fmt.Fprintln(a.Stdout, "  mockingo login --api-url URL --token TOKEN  # deprecated legacy gateway login")
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
-	fmt.Fprintln(a.Stdout, "  mockingo expose --legacy --name NAME --http PORT  # deprecated compatibility mode")
-	fmt.Fprintln(a.Stdout, "  mockingo endpoints list [--json]")
-	fmt.Fprintln(a.Stdout, "  mockingo endpoints delete NAME [--force]")
 	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
 
@@ -91,6 +85,15 @@ func (a *App) path() (string, error) {
 }
 
 func (a *App) expose(ctx context.Context, args []string) (int, error) {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--help" || arg == "-h" {
+			a.exposeUsage()
+			return 0, nil
+		}
+	}
 	options, err := ParseExpose(args)
 	if err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
@@ -115,46 +118,35 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		if !options.Legacy && errors.Is(err, config.ErrNotConfigured) {
+		if errors.Is(err, config.ErrNotConfigured) {
 			return 1, apiclient.ErrNotSignedIn
 		}
 		return 1, fmt.Errorf("configuration error: %w", err)
 	}
-	legacyAPIURL, legacyToken, hasLegacy := cfg.Legacy()
-	var controlClient *apiclient.Client
-	var identity apiclient.Me
-	if options.Legacy {
-		if !hasLegacy {
-			return 1, errors.New("legacy gateway credentials are not configured; run 'mockingo login --api-url URL --token TOKEN'")
-		}
-		fmt.Fprintln(a.Stderr, "Warning: legacy tunnel authentication is deprecated and will be removed.")
-	} else {
-		if cfg.OAuthIssuer == "" || cfg.OAuthClientID == "" || cfg.APIURL == "" {
-			return 1, apiclient.ErrNotSignedIn
-		}
-		metadata, discoverErr := oauth.Discover(ctx, a.httpClient(), cfg.OAuthIssuer)
-		if discoverErr != nil {
-			return 1, discoverErr
-		}
-		apiURL := cfg.APIURL
-		if options.APIURL != "" {
-			apiURL, err = validateAPIURL(options.APIURL)
-			if err != nil {
-				return 2, fmt.Errorf("invalid arguments: %w", err)
-			}
-		}
-		controlClient = &apiclient.Client{
-			HTTP: a.httpClient(), APIURL: apiURL, Issuer: cfg.OAuthIssuer,
-			ClientID: cfg.OAuthClientID, Scopes: strings.Fields(cfg.OAuthScopes), Metadata: metadata,
-			Store: a.credentialStore(path, options.AllowFileCredentials),
-		}
-		identity, err = controlClient.Me(ctx)
-		if err != nil {
-			return 1, err
-		}
-		fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
+	if cfg.OAuthIssuer == "" || cfg.OAuthClientID == "" || cfg.APIURL == "" {
+		return 1, apiclient.ErrNotSignedIn
 	}
-
+	metadata, discoverErr := oauth.Discover(ctx, a.httpClient(), cfg.OAuthIssuer)
+	if discoverErr != nil {
+		return 1, discoverErr
+	}
+	apiURL := cfg.APIURL
+	if options.APIURL != "" {
+		apiURL, err = validateAPIURL(options.APIURL)
+		if err != nil {
+			return 2, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	controlClient := &apiclient.Client{
+		HTTP: a.httpClient(), APIURL: apiURL, Issuer: cfg.OAuthIssuer,
+		ClientID: cfg.OAuthClientID, Scopes: strings.Fields(cfg.OAuthScopes), Metadata: metadata,
+		Store: a.credentialStore(path, options.AllowFileCredentials),
+	}
+	identity, err := controlClient.Me(ctx)
+	if err != nil {
+		return 1, err
+	}
+	fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var child *process.Process
@@ -221,52 +213,32 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if options.Verbose {
 		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
 	}
-	var tunnelAgent *agent.Agent
-	var publicURL string
-	if options.Legacy {
-		httpClient := &http.Client{Timeout: 30 * time.Second}
-		registration, registerErr := agent.Register(runCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
-		if registerErr != nil {
-			return 1, fmt.Errorf("gateway registration failure: %w", registerErr)
-		}
-		publicURL = registration.PublicURL
-		fmt.Fprintf(a.Stdout, "Registering endpoint %s...\n", registration.Hostname)
-		tunnelAgent = agent.New(agent.Config{
-			ConnectURL: registration.ConnectURL, SessionToken: registration.SessionToken,
-			LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
-			OnState: state, Verbose: verbose, PublicURL: registration.PublicURL,
-			Reregister: func(registerCtx context.Context) (agent.Registration, error) {
-				return agent.Register(registerCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
-			},
-		})
-	} else {
-		request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: "http", LocalPort: options.HTTPPort, ProtocolVersion: options.ProtocolVersion}
-		validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
-		createSession := func(sessionCtx context.Context) (agent.Session, error) {
-			response, createErr := controlClient.CreateTunnelSession(sessionCtx, request, validation)
-			if createErr != nil {
-				return agent.Session{}, mapTunnelSessionError(options.Name, createErr)
-			}
-			return agent.Session{
-				EndpointID: response.Endpoint.ID, EndpointName: response.Endpoint.Name,
-				SessionID: response.Tunnel.SessionID, ConnectURL: response.Tunnel.ConnectURL,
-				Ticket: response.Tunnel.Ticket, PublicURL: response.Endpoint.PublicURL,
-			}, nil
-		}
-		initial, createErr := createSession(runCtx)
+	request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: "http", LocalPort: options.HTTPPort, ProtocolVersion: options.ProtocolVersion}
+	validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
+	createSession := func(sessionCtx context.Context) (agent.Session, error) {
+		response, createErr := controlClient.CreateTunnelSession(sessionCtx, request, validation)
 		if createErr != nil {
-			return 1, createErr
+			return agent.Session{}, mapTunnelSessionError(options.Name, createErr)
 		}
-		publicURL = initial.PublicURL
-		fmt.Fprintf(a.Stdout, "✓ Endpoint reserved: %s\n", initial.EndpointName)
-		tunnelAgent = agent.New(agent.Config{
-			InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable, TemporaryConflict: apiclient.IsTemporarySessionConflict,
-			LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
-			OnState: state, Verbose: verbose, PublicURL: initial.PublicURL,
-			ReconnectEnabled: options.ReconnectEnabled, ReconnectInitialDelay: options.ReconnectInitialDelay,
-			ReconnectMaxDelay: options.ReconnectMaxDelay,
-		})
+		return agent.Session{
+			EndpointID: response.Endpoint.ID, EndpointName: response.Endpoint.Name,
+			SessionID: response.Tunnel.SessionID, ConnectURL: response.Tunnel.ConnectURL,
+			Ticket: response.Tunnel.Ticket, PublicURL: response.Endpoint.PublicURL,
+		}, nil
 	}
+	initial, createErr := createSession(runCtx)
+	if createErr != nil {
+		return 1, createErr
+	}
+	publicURL := initial.PublicURL
+	fmt.Fprintf(a.Stdout, "✓ Endpoint reserved: %s\n", initial.EndpointName)
+	tunnelAgent := agent.New(agent.Config{
+		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable, TemporaryConflict: apiclient.IsTemporarySessionConflict,
+		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
+		OnState: state, Verbose: verbose, PublicURL: initial.PublicURL,
+		ReconnectEnabled: options.ReconnectEnabled, ReconnectInitialDelay: options.ReconnectInitialDelay,
+		ReconnectMaxDelay: options.ReconnectMaxDelay,
+	})
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- tunnelAgent.Run(runCtx) }()
 
@@ -328,6 +300,13 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 }
 
+func (a *App) exposeUsage() {
+	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "")
+	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")
+	fmt.Fprintln(a.Stdout, "Options: --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
+}
+
 func mapTunnelSessionError(name string, err error) error {
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
@@ -339,88 +318,6 @@ func mapTunnelSessionError(name string, err error) error {
 		}
 	}
 	return err
-}
-
-func (a *App) endpoints(ctx context.Context, args []string) (int, error) {
-	if len(args) == 0 {
-		return 2, errors.New("invalid arguments: expected 'list' or 'delete'")
-	}
-	path, err := a.path()
-	if err != nil {
-		return 1, fmt.Errorf("configuration error: %w", err)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		return 1, fmt.Errorf("configuration error: %w", err)
-	}
-	legacyAPIURL, legacyToken, ok := cfg.Legacy()
-	if !ok {
-		return 1, errors.New("legacy gateway credentials are not configured; endpoint ticket integration is deferred")
-	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	switch args[0] {
-	case "list":
-		set := flag.NewFlagSet("endpoints list", flag.ContinueOnError)
-		set.SetOutput(a.Stderr)
-		asJSON := set.Bool("json", false, "print JSON")
-		if err := set.Parse(args[1:]); err != nil || set.NArg() != 0 {
-			return 2, errors.New("invalid arguments for endpoints list")
-		}
-		values, err := agent.ListEndpoints(ctx, client, legacyAPIURL, legacyToken)
-		if err != nil {
-			return 1, err
-		}
-		if *asJSON {
-			encoder := json.NewEncoder(a.Stdout)
-			encoder.SetIndent("", "  ")
-			return 0, encoder.Encode(map[string]any{"endpoints": values})
-		}
-		writer := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(writer, "NAME\tHOSTNAME\tSTATUS")
-		for _, value := range values {
-			fmt.Fprintf(writer, "%s\t%s\t%s\n", value.Name, value.Hostname, value.Status)
-		}
-		if err := writer.Flush(); err != nil {
-			return 1, err
-		}
-		return 0, nil
-	case "delete":
-		force := false
-		name := ""
-		for _, value := range args[1:] {
-			switch {
-			case value == "--force":
-				force = true
-			case strings.HasPrefix(value, "-") || name != "":
-				return 2, errors.New("invalid arguments: endpoints delete requires NAME and optional --force")
-			default:
-				name = strings.ToLower(value)
-			}
-		}
-		if name == "" {
-			return 2, errors.New("invalid arguments: endpoints delete requires NAME")
-		}
-		if err := naming.Validate(name); err != nil {
-			return 2, fmt.Errorf("invalid arguments: %w", err)
-		}
-		if !force {
-			fmt.Fprintf(a.Stdout, "Delete endpoint %s? Type its name to confirm: ", name)
-			input, readErr := bufio.NewReader(a.Stdin).ReadString('\n')
-			if readErr != nil && !errors.Is(readErr, io.EOF) {
-				return 1, fmt.Errorf("read confirmation: %w", readErr)
-			}
-			if strings.TrimSpace(input) != name {
-				return 1, errors.New("deletion cancelled")
-			}
-		}
-		if err := agent.DeleteEndpoint(ctx, client, legacyAPIURL, legacyToken, name); err != nil {
-			return 1, err
-		}
-		fmt.Fprintf(a.Stdout, "Endpoint %s deleted.\n", name)
-		return 0, nil
-	default:
-		return 2, fmt.Errorf("invalid arguments: unknown endpoints command %q", args[0])
-	}
 }
 
 func exitCode(result process.Result) int {

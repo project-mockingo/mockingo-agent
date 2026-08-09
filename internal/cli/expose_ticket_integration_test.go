@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -137,7 +138,7 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 
 func TestExposeDoesNotFallBackToLegacyCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Save(path, config.Config{LegacyAPIURL: "https://gateway.example", LegacyToken: "legacy"}); err != nil {
+	if err := os.WriteFile(path, []byte(`{"legacyApiUrl":"https://gateway.example","legacyToken":"test-only-static-token"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer

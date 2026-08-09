@@ -21,13 +21,10 @@ import (
 )
 
 type Config struct {
-	ConnectURL            string
-	SessionToken          string
 	LocalPort             int
 	RequestTimeout        time.Duration
 	OnState               func(string)
 	Verbose               func(string, ...any)
-	Reregister            func(context.Context) (Registration, error)
 	PublicURL             string
 	InitialSession        *Session
 	AcquireSession        func(context.Context) (Session, error)
@@ -69,78 +66,12 @@ func New(config Config) *Agent {
 }
 
 // Run owns the connection state machine until its parent context is cancelled.
-// Ticket mode acquires a fresh backend session before every reconnect attempt;
-// legacy mode preserves the transitional registration behavior.
+// It acquires a fresh backend session before every reconnect attempt.
 func (a *Agent) Run(ctx context.Context) error {
-	if a.config.AcquireSession != nil {
-		return a.runTicket(ctx)
+	if a.config.AcquireSession == nil {
+		return errors.New("backend tunnel-session provider is required")
 	}
-	return a.runLegacy(ctx)
-}
-
-func (a *Agent) runLegacy(ctx context.Context) error {
-	delay := time.Second
-	connectedOnce := false
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		headers := http.Header{"Authorization": []string{"Bearer " + a.config.SessionToken}}
-		ws, response, err := dialWebSocket(ctx, a.config.ConnectURL, headers)
-		status := 0
-		if response != nil {
-			status = response.StatusCode
-		}
-		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
-		}
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if (status == http.StatusUnauthorized || status == http.StatusNotFound) && a.config.Reregister != nil {
-				if a.config.OnState != nil {
-					a.config.OnState("Tunnel session expired. Creating a new session...")
-				}
-				registration, registerErr := a.config.Reregister(ctx)
-				if registerErr == nil {
-					a.config.ConnectURL = registration.ConnectURL
-					a.config.SessionToken = registration.SessionToken
-					a.config.PublicURL = registration.PublicURL
-					delay = time.Second
-					continue
-				}
-				if a.config.Verbose != nil {
-					a.config.Verbose("new tunnel registration failed: %v", registerErr)
-				}
-			}
-			if a.config.Verbose != nil {
-				a.config.Verbose("tunnel connection failed: %v", err)
-			}
-			if err := waitBackoff(ctx, delay); err != nil {
-				return nil
-			}
-			delay = nextDelay(delay)
-			continue
-		}
-		if connectedOnce && a.config.OnState != nil {
-			a.config.OnState("Reconnected. Public endpoint unchanged:\n" + a.config.PublicURL)
-		} else if a.config.OnState != nil {
-			a.config.OnState("Connected to Mockingo Gateway.")
-		}
-		connectedOnce = true
-		delay = time.Second
-		err = a.serveConnection(ctx, ws)
-		if ctx.Err() != nil {
-			return nil
-		}
-		if a.config.OnState != nil {
-			a.config.OnState("Connection lost. Reconnecting...")
-		}
-		if a.config.Verbose != nil && err != nil {
-			a.config.Verbose("tunnel disconnected: %v", err)
-		}
-	}
+	return a.runTicket(ctx)
 }
 
 type GatewayError struct {
@@ -355,10 +286,6 @@ func waitBackoff(ctx context.Context, base time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func nextDelay(current time.Duration) time.Duration {
-	return nextDelayMax(current, 15*time.Second)
 }
 
 func nextDelayMax(current, maximum time.Duration) time.Duration {

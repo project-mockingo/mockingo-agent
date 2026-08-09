@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/mockingo/mockingo-cli/internal/endpoint"
 	"github.com/mockingo/mockingo-cli/internal/gateway/backendcallback"
 	"github.com/mockingo/mockingo-cli/internal/gateway/ticketauth"
 )
@@ -30,7 +29,7 @@ func (s *Server) handleTicketConnect(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 	if s.config.TicketVerifier == nil {
-		writeJSON(w, http.StatusForbidden, apiError{Code: "unauthorized", Message: "Tunnel ticket authentication is disabled."})
+		s.ticketError(w, http.StatusUnauthorized, "invalid_tunnel_ticket", "The tunnel authorization is invalid or expired.")
 		return
 	}
 	if s.shuttingDown.Load() {
@@ -57,17 +56,6 @@ func (s *Server) handleTicketConnect(w http.ResponseWriter, r *http.Request, req
 		s.ticketError(w, http.StatusUnauthorized, "expired_tunnel_ticket", "The tunnel authorization is invalid or expired.")
 		return
 	}
-	if value, lookupErr := s.repository.GetEndpointByName(r.Context(), claims.EndpointName); lookupErr == nil {
-		if value.ID != claims.EndpointID {
-			s.rejected(claims, "endpoint_identity_conflict", requestID)
-			s.ticketError(w, http.StatusConflict, "endpoint_identity_conflict", "The endpoint identity conflicts with gateway persistence.")
-			return
-		}
-	} else if !errors.Is(lookupErr, endpoint.ErrNotFound) {
-		s.rejected(claims, "gateway_unavailable", requestID)
-		s.ticketError(w, http.StatusServiceUnavailable, "gateway_unavailable", "The gateway is temporarily unavailable.")
-		return
-	}
 	if err := s.config.TicketVerifier.Consume(claims.SessionID, claims.ExpiresAt); err != nil {
 		if errors.Is(err, ticketauth.ErrReplay) {
 			s.rejected(claims, "session_replayed", requestID)
@@ -82,9 +70,9 @@ func (s *Server) handleTicketConnect(w http.ResponseWriter, r *http.Request, req
 		EndpointID: claims.EndpointID, SessionID: claims.SessionID, OwnerUserID: claims.Subject,
 		EndpointName: claims.EndpointName, Hostname: claims.EndpointName + "." + strings.ToLower(strings.TrimSuffix(s.config.BaseDomain, ".")),
 		Protocol: claims.Protocol, LocalPort: claims.LocalPort, ProtocolVersion: claims.ProtocolVersion,
-		ConnectedAt: time.Now().UTC(), AuthMethod: TunnelAuthTicket,
+		ConnectedAt: time.Now().UTC(),
 	}
-	if err := s.store.ReserveTicket(active, claims.ExpiresAt); err != nil {
+	if err := s.store.ReserveTicket(active); err != nil {
 		reason := "endpoint_already_connected"
 		code := reason
 		if errors.Is(err, ErrSessionConnected) {
@@ -111,7 +99,7 @@ func (s *Server) handleTicketConnect(w http.ResponseWriter, r *http.Request, req
 		conn.closeGracefully(DisconnectProtocolError)
 		return
 	}
-	s.metrics.tunnelConnected(string(TunnelAuthTicket))
+	s.metrics.tunnelConnected()
 	s.tunnelWG.Add(1)
 	defer s.tunnelWG.Done()
 	defer func() {
@@ -119,11 +107,11 @@ func (s *Server) handleTicketConnect(w http.ResponseWriter, r *http.Request, req
 		active, reason, removed := s.store.detach(claims.SessionID, conn, DisconnectClientClosed)
 		if removed {
 			s.disconnected(active, reason, requestID)
-			s.config.Logger.Info("tunnel disconnected", "requestId", requestID, "endpointId", active.EndpointID, "endpointName", active.EndpointName, "sessionId", active.SessionID, "authMethod", active.AuthMethod, "reason", reason)
+			s.config.Logger.Info("tunnel disconnected", "requestId", requestID, "endpointId", active.EndpointID, "endpointName", active.EndpointName, "sessionId", active.SessionID, "reason", reason)
 		}
 	}()
 	registered, _ := s.store.ActiveBySession(claims.SessionID)
-	s.config.Logger.Info("tunnel connected", "requestId", requestID, "gatewayInstanceId", s.config.GatewayInstanceID, "endpointId", registered.EndpointID, "endpointName", registered.EndpointName, "sessionId", registered.SessionID, "protocol", registered.Protocol, "protocolVersion", registered.ProtocolVersion, "authMethod", registered.AuthMethod)
+	s.config.Logger.Info("tunnel connected", "requestId", requestID, "gatewayInstanceId", s.config.GatewayInstanceID, "endpointId", registered.EndpointID, "endpointName", registered.EndpointName, "sessionId", registered.SessionID, "protocol", registered.Protocol, "protocolVersion", registered.ProtocolVersion)
 	callbackCtx, cancel := s.callbackContext(requestID)
 	err = s.config.CallbackClient.Connected(callbackCtx, backendcallback.ConnectedEvent{
 		SessionID: claims.SessionID, EndpointID: claims.EndpointID, GatewayInstanceID: s.config.GatewayInstanceID, ConnectedAt: registered.ConnectedAt.UTC(),
@@ -180,9 +168,6 @@ func (s *Server) rejected(claims ticketauth.TunnelTicketClaims, reason, requestI
 }
 
 func (s *Server) disconnected(active ActiveTunnel, reason, requestID string) {
-	if active.AuthMethod != TunnelAuthTicket {
-		return
-	}
 	s.callbackWG.Add(1)
 	go func() {
 		defer s.callbackWG.Done()

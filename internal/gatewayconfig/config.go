@@ -16,15 +16,11 @@ type Config struct {
 	BaseDomain        string
 	GatewayHost       string
 	PublicScheme      string
-	APIPublicURL      string
-	APIToken          string
 	DatabaseURL       string
 	TrustedProxyCIDRs string
 	LogLevel          string
 	MetricsEnabled    bool
 
-	TicketAuthEnabled       bool
-	LegacyTunnelAuthEnabled bool
 	BackendURL              string
 	BackendJWKSURL          string
 	TicketIssuer            string
@@ -48,19 +44,11 @@ func Load() (Config, error) {
 	baseDomain := strings.ToLower(strings.TrimSuffix(env("MOCKINGO_BASE_DOMAIN", "mockingo.click"), "."))
 	publicScheme := strings.ToLower(env("MOCKINGO_PUBLIC_SCHEME", "https"))
 	gatewayHost := strings.ToLower(strings.TrimSuffix(env("MOCKINGO_GATEWAY_HOST", "gateway.mockingo.com"), "."))
-	apiPublicURL := os.Getenv("MOCKINGO_API_PUBLIC_URL")
-	if apiPublicURL == "" {
-		if environment == "development" && baseDomain == "localhost" {
-			apiPublicURL = publicScheme + "://localhost:9090"
-		} else {
-			apiPublicURL = publicScheme + "://" + gatewayHost
-		}
-	}
 	backendURL := strings.TrimRight(env("MOCKINGO_BACKEND_URL", "https://api.mockingo.com"), "/")
 	value := Config{
 		Environment: environment, Address: env("MOCKINGO_GATEWAY_ADDR", ":9090"),
 		BaseDomain: baseDomain, GatewayHost: gatewayHost, PublicScheme: publicScheme,
-		APIPublicURL: strings.TrimRight(apiPublicURL, "/"), DatabaseURL: os.Getenv("DATABASE_URL"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		TrustedProxyCIDRs: os.Getenv("MOCKINGO_TRUSTED_PROXY_CIDRS"), LogLevel: strings.ToLower(env("MOCKINGO_LOG_LEVEL", "info")),
 		BackendURL: backendURL, BackendJWKSURL: strings.TrimRight(env("MOCKINGO_BACKEND_JWKS_URL", backendURL+"/.well-known/mockingo-tunnel-jwks.json"), "/"),
 		TicketIssuer:         strings.TrimRight(env("MOCKINGO_TUNNEL_TICKET_ISSUER", backendURL), "/"),
@@ -70,12 +58,6 @@ func Load() (Config, error) {
 		GatewayInstanceID:    env("MOCKINGO_GATEWAY_INSTANCE_ID", hostname()),
 	}
 	var err error
-	if value.TicketAuthEnabled, err = boolEnv("MOCKINGO_TICKET_AUTH_ENABLED", true); err != nil {
-		return Config{}, err
-	}
-	if value.LegacyTunnelAuthEnabled, err = boolEnv("MOCKINGO_LEGACY_TUNNEL_AUTH_ENABLED", true); err != nil {
-		return Config{}, err
-	}
 	if value.MetricsEnabled, err = boolEnv("MOCKINGO_METRICS_ENABLED", false); err != nil {
 		return Config{}, err
 	}
@@ -109,16 +91,6 @@ func Load() (Config, error) {
 		*duration.target, err = time.ParseDuration(env(duration.key, duration.fallback))
 		if err != nil {
 			return Config{}, fmt.Errorf("%s must be a valid duration", duration.key)
-		}
-	}
-	allowDev, err := boolEnv("MOCKINGO_ALLOW_DEV_TOKEN", false)
-	if err != nil {
-		return Config{}, err
-	}
-	value.APIToken = os.Getenv("MOCKINGO_API_TOKEN")
-	if value.Environment == "development" || allowDev {
-		if value.APIToken == "" {
-			value.APIToken = os.Getenv("MOCKINGO_DEV_TOKEN")
 		}
 	}
 	if err := value.Validate(); err != nil {
@@ -191,24 +163,13 @@ func (c Config) Validate() error {
 	if c.GatewayHost != "" && (strings.ContainsAny(c.GatewayHost, "/:@ ") || strings.Contains(c.GatewayHost, "..")) {
 		return errors.New("MOCKINGO_GATEWAY_HOST is invalid")
 	}
-	if err := validateHTTPURL("MOCKINGO_API_PUBLIC_URL", c.APIPublicURL, production); err != nil {
-		return err
-	}
-	publicURL, _ := url.Parse(c.APIPublicURL)
-	if production && (c.GatewayHost == "" || !strings.EqualFold(publicURL.Hostname(), c.GatewayHost)) {
-		return errors.New("MOCKINGO_API_PUBLIC_URL must use MOCKINGO_GATEWAY_HOST in production")
+	if production && c.GatewayHost == "" {
+		return errors.New("MOCKINGO_GATEWAY_HOST is required in production")
 	}
 	if production && (strings.EqualFold(c.GatewayHost, c.BaseDomain) || strings.HasSuffix(strings.ToLower(c.GatewayHost), "."+strings.ToLower(c.BaseDomain))) {
 		return errors.New("the gateway service host must not use the public tunnel base domain")
 	}
-	if c.LegacyTunnelAuthEnabled && c.APIToken == "" {
-		return errors.New("MOCKINGO_API_TOKEN is required when legacy tunnel authentication is enabled")
-	}
 	if production {
-		lower := strings.ToLower(c.APIToken)
-		if len(c.APIToken) < 32 || strings.Contains(lower, "replace") || strings.Contains(lower, "example") || c.APIToken == "development-token" {
-			return errors.New("MOCKINGO_API_TOKEN must be a strong, non-example secret of at least 32 characters in production")
-		}
 		if c.DatabaseURL == "" {
 			return errors.New("DATABASE_URL is required in production")
 		}
@@ -216,47 +177,45 @@ func (c Config) Validate() error {
 			return errors.New("production public URLs must use HTTPS")
 		}
 	}
-	if c.TicketAuthEnabled {
-		if err := validateHTTPURL("MOCKINGO_BACKEND_URL", c.BackendURL, production); err != nil {
-			return err
-		}
-		if err := validateHTTPURL("MOCKINGO_BACKEND_JWKS_URL", c.BackendJWKSURL, production); err != nil {
-			return err
-		}
-		if err := validateHTTPURL("MOCKINGO_TUNNEL_TICKET_ISSUER", c.TicketIssuer, production); err != nil {
-			return err
-		}
-		backendURL, _ := url.Parse(c.BackendURL)
-		if production && (strings.EqualFold(backendURL.Hostname(), c.BaseDomain) || strings.HasSuffix(strings.ToLower(backendURL.Hostname()), "."+strings.ToLower(c.BaseDomain))) {
-			return errors.New("the backend service URL must not use the public tunnel base domain")
-		}
-		if c.TicketIssuer == "" || c.TicketAudience == "" {
-			return errors.New("tunnel ticket issuer and audience are required when ticket authentication is enabled")
-		}
-		if production && (c.BackendCallbackToken == "" || c.GatewayInternalToken == "") {
-			return errors.New("backend callback and gateway internal tokens are required in production")
-		}
-		if c.BackendCallbackToken == "" {
-			return errors.New("MOCKINGO_BACKEND_CALLBACK_TOKEN is required when ticket authentication is enabled")
-		}
-		if c.GatewayInternalToken == "" {
-			return errors.New("MOCKINGO_GATEWAY_INTERNAL_TOKEN is required when ticket authentication is enabled")
-		}
-		if c.GatewayInstanceID == "" {
-			return errors.New("MOCKINGO_GATEWAY_INSTANCE_ID is required when ticket authentication is enabled")
-		}
-		if c.TunnelProtocolVersion != 1 {
-			return errors.New("MOCKINGO_TUNNEL_PROTOCOL_VERSION must be 1")
-		}
-		if c.JWKSRefreshInterval <= 0 || c.JWKSHTTPTimeout <= 0 || c.BackendCallbackTimeout <= 0 || c.BackendCallbackBackoff <= 0 || c.TicketClockSkew <= 0 {
-			return errors.New("gateway ticket and callback durations must be positive")
-		}
-		if c.BackendCallbackAttempts < 1 || c.BackendCallbackAttempts > 10 {
-			return errors.New("MOCKINGO_BACKEND_CALLBACK_ATTEMPTS must be between 1 and 10")
-		}
-		if c.ReplayCacheMaxEntries < 1 || c.InternalStatusMaxBatch < 1 {
-			return errors.New("gateway replay and internal batch limits must be positive")
-		}
+	if err := validateHTTPURL("MOCKINGO_BACKEND_URL", c.BackendURL, production); err != nil {
+		return err
+	}
+	if err := validateHTTPURL("MOCKINGO_BACKEND_JWKS_URL", c.BackendJWKSURL, production); err != nil {
+		return err
+	}
+	if err := validateHTTPURL("MOCKINGO_TUNNEL_TICKET_ISSUER", c.TicketIssuer, production); err != nil {
+		return err
+	}
+	backendURL, _ := url.Parse(c.BackendURL)
+	if production && (strings.EqualFold(backendURL.Hostname(), c.BaseDomain) || strings.HasSuffix(strings.ToLower(backendURL.Hostname()), "."+strings.ToLower(c.BaseDomain))) {
+		return errors.New("the backend service URL must not use the public tunnel base domain")
+	}
+	if c.TicketIssuer == "" || c.TicketAudience == "" {
+		return errors.New("tunnel ticket issuer and audience are required")
+	}
+	if production && (c.BackendCallbackToken == "" || c.GatewayInternalToken == "") {
+		return errors.New("backend callback and gateway internal tokens are required in production")
+	}
+	if c.BackendCallbackToken == "" {
+		return errors.New("MOCKINGO_BACKEND_CALLBACK_TOKEN is required")
+	}
+	if c.GatewayInternalToken == "" {
+		return errors.New("MOCKINGO_GATEWAY_INTERNAL_TOKEN is required")
+	}
+	if c.GatewayInstanceID == "" {
+		return errors.New("MOCKINGO_GATEWAY_INSTANCE_ID is required")
+	}
+	if c.TunnelProtocolVersion != 1 {
+		return errors.New("MOCKINGO_TUNNEL_PROTOCOL_VERSION must be 1")
+	}
+	if c.JWKSRefreshInterval <= 0 || c.JWKSHTTPTimeout <= 0 || c.BackendCallbackTimeout <= 0 || c.BackendCallbackBackoff <= 0 || c.TicketClockSkew <= 0 {
+		return errors.New("gateway ticket and callback durations must be positive")
+	}
+	if c.BackendCallbackAttempts < 1 || c.BackendCallbackAttempts > 10 {
+		return errors.New("MOCKINGO_BACKEND_CALLBACK_ATTEMPTS must be between 1 and 10")
+	}
+	if c.ReplayCacheMaxEntries < 1 || c.InternalStatusMaxBatch < 1 {
+		return errors.New("gateway replay and internal batch limits must be positive")
 	}
 	if c.LogLevel != "debug" && c.LogLevel != "info" && c.LogLevel != "warn" && c.LogLevel != "error" {
 		return fmt.Errorf("unsupported MOCKINGO_LOG_LEVEL %q", c.LogLevel)

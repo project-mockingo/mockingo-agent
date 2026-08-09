@@ -13,8 +13,8 @@ import (
 	"github.com/mockingo/mockingo-cli/internal/atomicfile"
 )
 
-// Config contains non-secret OAuth metadata and the temporarily-supported
-// legacy gateway credential. New OAuth tokens are never written here.
+// Config contains non-secret OAuth metadata. OAuth access and refresh tokens
+// are stored separately in the operating-system credential store.
 type Config struct {
 	APIURL        string     `json:"apiUrl,omitempty"`
 	OAuthIssuer   string     `json:"oauthIssuer,omitempty"`
@@ -22,11 +22,6 @@ type Config struct {
 	OAuthScopes   string     `json:"oauthScopes,omitempty"`
 	UserID        string     `json:"userId,omitempty"`
 	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-
-	// Token is retained only for migration compatibility with Stage 2A files.
-	Token        string `json:"token,omitempty"`
-	LegacyAPIURL string `json:"legacyApiUrl,omitempty"`
-	LegacyToken  string `json:"legacyToken,omitempty"`
 }
 
 var ErrNotConfigured = errors.New("configuration not found; run 'mockingo login' first")
@@ -48,9 +43,6 @@ func (c Config) Validate() error {
 	if c.APIURL != "" && !validHTTPURL(c.APIURL) {
 		return errors.New("API URL must be an http or https URL without credentials, query, or fragment")
 	}
-	if c.LegacyAPIURL != "" && !validHTTPURL(c.LegacyAPIURL) {
-		return errors.New("legacy API URL must be an http or https URL without credentials, query, or fragment")
-	}
 	if c.OAuthIssuer != "" && !validHTTPURL(c.OAuthIssuer) {
 		return errors.New("OAuth issuer must be an http or https URL without credentials, query, or fragment")
 	}
@@ -59,15 +51,6 @@ func (c Config) Validate() error {
 	}
 	if c.OAuthClientID != "" && strings.TrimSpace(c.OAuthIssuer) == "" {
 		return errors.New("OAuth issuer is required with an OAuth client ID")
-	}
-	if c.Token != "" && c.APIURL == "" {
-		return errors.New("API URL is required with the legacy token")
-	}
-	if c.LegacyToken != "" && c.LegacyAPIURL == "" {
-		return errors.New("legacy API URL is required with the legacy token")
-	}
-	if c.APIURL == "" && c.OAuthIssuer == "" && c.Token == "" && c.LegacyToken == "" {
-		return errors.New("configuration is empty")
 	}
 	return nil
 }
@@ -140,25 +123,7 @@ func LoadOptional(path string) (Config, error) {
 	return cfg, err
 }
 
-// Legacy returns the old gateway URL and static token without ever falling
-// back to OAuth credentials.
-func (c Config) Legacy() (string, string, bool) {
-	if c.LegacyAPIURL != "" && c.LegacyToken != "" {
-		return c.LegacyAPIURL, c.LegacyToken, true
-	}
-	if c.Token != "" {
-		return c.APIURL, c.Token, true
-	}
-	return "", "", false
-}
-
-// SetOAuth migrates a root legacy credential before assigning the control
-// plane API URL, preventing an OAuth login from breaking expose.
 func (c *Config) SetOAuth(apiURL, issuer, clientID string, scopes []string, userID string, expiresAt time.Time) {
-	if c.Token != "" {
-		c.LegacyAPIURL, c.LegacyToken = c.APIURL, c.Token
-		c.Token = ""
-	}
 	c.APIURL = strings.TrimRight(apiURL, "/")
 	c.OAuthIssuer = strings.TrimRight(issuer, "/")
 	c.OAuthClientID = clientID
@@ -174,12 +139,8 @@ func (c *Config) ClearOAuth() {
 	c.OAuthScopes = ""
 	c.UserID = ""
 	c.ExpiresAt = nil
-	if c.LegacyToken != "" {
-		c.APIURL = ""
-	}
 }
 
 func (c Config) Empty() bool {
-	_, _, legacy := c.Legacy()
-	return !legacy && c.OAuthIssuer == ""
+	return c.APIURL == "" && c.OAuthIssuer == "" && c.OAuthClientID == "" && c.OAuthScopes == "" && c.UserID == "" && c.ExpiresAt == nil
 }

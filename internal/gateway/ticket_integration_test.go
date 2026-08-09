@@ -106,18 +106,11 @@ func newTicketHarness(t *testing.T) *ticketHarness {
 		Issuer: "https://api.mockingo.com", Audience: "mockingo-gateway", ProtocolVersion: 1,
 		ClockSkew: time.Second, Keys: cache, ReplayMax: 100,
 	})
-	repository := endpoint.NewMemoryRepository()
-	now := time.Now().UTC()
-	_, err = repository.CreateEndpoint(context.Background(), endpoint.Endpoint{
-		ID: ticketEndpointID, Name: "spring-demo", Hostname: "spring-demo.mockingo.click", CreatedAt: now, UpdatedAt: now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog := endpoint.NewMemoryCatalog("spring-demo.mockingo.click")
 	callbacks := newFakeCallbacks()
 	handler := NewServer(Config{
 		BaseDomain: "mockingo.click", GatewayHost: "gateway.mockingo.com", PublicScheme: "https",
-		Repository: repository, TicketVerifier: verifier, CallbackClient: callbacks,
+		Catalog: catalog, TicketVerifier: verifier, CallbackClient: callbacks,
 		GatewayInternalToken: "internal-secret", GatewayInstanceID: "gateway-1",
 		InternalStatusMaxBatch: 10, BackendCallbackBudget: time.Second,
 	})
@@ -281,7 +274,7 @@ func internalRequest(t *testing.T, server *httptest.Server, path, token string, 
 	return response
 }
 
-func TestInternalAuthenticationValidationAndLegacySwitch(t *testing.T) {
+func TestInternalAuthenticationValidationAndRemovedRoutes(t *testing.T) {
 	harness := newTicketHarness(t)
 	for _, token := range []string{"", harness.ticket(t, ticketSessionID, nil), "wrong"} {
 		response := internalRequest(t, harness.server, "/internal/v1/tunnels/status", token, []byte(`{"endpointIds":[]}`))
@@ -303,9 +296,25 @@ func TestInternalAuthenticationValidationAndLegacySwitch(t *testing.T) {
 		t.Fatalf("oversized batch status = %d", response.StatusCode)
 	}
 	_ = response.Body.Close()
-	registration := createTunnelRequest(t, harness.handler, "", "legacy-demo")
-	if registration.Code != http.StatusForbidden {
-		t.Fatalf("disabled legacy registration = %d %s", registration.Code, registration.Body.String())
+	for _, path := range []string{"/api/v1/tunnels", "/api/v1/endpoints", "/api/v1/endpoints/demo"} {
+		request := httptest.NewRequest(http.MethodPost, "http://gateway"+path, nil)
+		recorder := httptest.NewRecorder()
+		harness.handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("removed route %s = %d %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	ws, response, err := harness.dial(t, "test-only-static-token")
+	if ws != nil {
+		_ = ws.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("static token response = %#v, %v", response, err)
+	}
+	defer response.Body.Close()
+	var rejected apiError
+	if err := json.NewDecoder(response.Body).Decode(&rejected); err != nil || rejected.Code != "invalid_tunnel_ticket" {
+		t.Fatalf("static token error = %#v, %v", rejected, err)
 	}
 }
 
