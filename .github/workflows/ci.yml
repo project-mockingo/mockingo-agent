@@ -1,4 +1,4 @@
-name: CI
+name: CLI CI
 
 on:
   push:
@@ -14,10 +14,8 @@ jobs:
           go-version: '1.25.x'
           cache: true
       - name: Verify formatting
-        run: test -z "$(gofmt -l cmd internal pkg)"
+        run: test -z "$(gofmt -l cmd internal *.go)"
       - run: go test ./...
+      - run: go test -race ./...
       - run: go vet ./...
       - run: make cross-build
-      - run: docker build -f deploy/Dockerfile.gateway -t mockingo-gateway:ci .
-      - run: cp deploy/env.example deploy/.env
-      - run: docker compose --env-file deploy/.env -f deploy/docker-compose.production.yml config --quiet

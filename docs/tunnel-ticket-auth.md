@@ -1,17 +1,14 @@
-# Tunnel ticket authentication
+# Tunnel ticket use in the CLI
 
-`GET /v1/connect` accepts exactly one `Authorization: Bearer <ticket>` header on a WebSocket upgrade. The existing backend-issued JWT contract and protocol v1 wire format are unchanged.
+The Spring Boot control plane returns a short-lived, one-use tunnel ticket and
+validated gateway URL for every initial connection or reconnect. The CLI sends
+that ticket only as one `Authorization: Bearer <ticket>` header on the
+WebSocket upgrade to `/v1/connect`.
 
-The gateway validates RS256, `kid`, cached JWKS, issuer, audience, temporal claims, `jti`/session ID, endpoint ID/name, owner subject, protocol, local port, and protocol version. A bounded replay cache consumes the ticket before the WebSocket becomes active. Endpoint/session/name collisions are rejected. Successful connections and terminal disconnects produce backend callbacks; trusted rejected sessions produce rejected callbacks.
+Tickets are never written to configuration, credential storage, logs, error
+messages, or fixtures. The in-memory ticket value is cleared immediately after
+the dial attempt. Static gateway tokens, query-parameter tickets, and direct
+gateway registration are not supported.
 
-Malformed values, static tokens, query-parameter values, duplicate authorization headers, expired tickets, and tickets with invalid claims receive a generic authentication error. Credentials are never logged.
-
-Required settings:
-
-- `MOCKINGO_BACKEND_URL`
-- `MOCKINGO_BACKEND_JWKS_URL`
-- `MOCKINGO_TUNNEL_TICKET_ISSUER`
-- `MOCKINGO_TUNNEL_TICKET_AUDIENCE`
-- `MOCKINGO_BACKEND_CALLBACK_TOKEN`
-- `MOCKINGO_GATEWAY_INTERNAL_TOKEN`
-- `MOCKINGO_GATEWAY_INSTANCE_ID`
+RS256/JWKS validation, replay protection, lifecycle callbacks, and gateway
+service credentials belong to the separate `mockingo-gateway` repository.

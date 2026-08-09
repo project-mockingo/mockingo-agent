@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/project-mockingo/mockingo-tunnel-protocol"
 )
 
 type envFlags []string
@@ -63,7 +65,7 @@ func ParseEnvironment(values []string) (map[string]string, error) {
 func ParseExpose(args []string) (ExposeOptions, error) {
 	var options ExposeOptions
 	var env envFlags
-	protocolVersion, err := envInt("MOCKINGO_TUNNEL_PROTOCOL_VERSION", 1)
+	protocolVersion, err := envInt("MOCKINGO_TUNNEL_PROTOCOL_VERSION", tunnelprotocol.Version)
 	if err != nil {
 		return ExposeOptions{}, err
 	}

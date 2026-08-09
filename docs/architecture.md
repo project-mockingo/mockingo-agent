@@ -1,30 +1,24 @@
-# Architecture
+# CLI architecture
 
 ```text
 mockingo CLI
-  | Clerk OAuth access token
+  | OAuth access token
   v
 api.mockingo.com (Spring Boot control plane)
   | short-lived, one-use tunnel ticket
   v
-gateway.mockingo.com/v1/connect (Go data plane)
-  | active in-memory session
+gateway.mockingo.com/v1/connect (external Go data plane)
+  | tunnel protocol v1
   v
-<name>.mockingo.click
+local HTTP target
 ```
 
-## Responsibility split
+The CLI owns OAuth/PKCE, secure credentials, control-plane API calls, tunnel
+session acquisition, gateway URL validation, WebSocket client behavior, local
+HTTP forwarding, reconnect/backoff, optional child-process lifecycle, and
+terminal output.
 
-`mockingo-backend` validates Clerk tokens, owns endpoint CRUD and ownership, performs Flyway migrations and PostgreSQL writes, creates tunnel sessions, and signs tickets.
-
-`mockingo-gateway` verifies tickets with cached backend JWKS, enforces replay and active-session collision rules, maintains the live registry, proxies public HTTP, sends connected/disconnected/rejected callbacks, and serves internal status/disconnect APIs.
-
-The CLI performs OAuth login, calls backend APIs with OAuth access tokens, obtains a fresh backend session for each connection/reconnect, and sends the tunnel ticket only to the backend-selected gateway URL.
-
-The gateway retains `endpointId`, `sessionId`, verified `ownerUserId`, endpoint name/hostname, protocol, local port, protocol version, and connection time in memory. Owner identity is operational metadata only and is not used for endpoint CRUD or ownership decisions.
-
-## Persistence transition
-
-Spring Boot owns the schema and all writes. The gateway has a narrow SELECT-only endpoint catalog so an inactive known hostname returns `502 tunnel_offline` while an unknown hostname returns `404 endpoint_not_found`. Active traffic uses the in-memory hostname index and does not query PostgreSQL or the backend.
-
-Gateway packages already aligned for repository extraction are `internal/gateway`, `internal/gateway/ticketauth`, `internal/gateway/backendcallback`, `internal/gatewayconfig`, `internal/endpoint` (transitional catalog), and `pkg/tunnelprotocol`. Extraction still requires deciding module boundaries, deployment ownership, shared wire-protocol versioning, and replacement/removal of the PostgreSQL catalog.
+The separate gateway owns ticket verification, JWKS, replay protection, active
+registries, wildcard public routing, callbacks, internal APIs, PostgreSQL
+catalog reads, health, metrics, and shutdown. Shared wire DTOs and limits come
+only from `github.com/project-mockingo/mockingo-tunnel-protocol`.

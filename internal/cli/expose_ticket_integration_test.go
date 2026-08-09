@@ -18,7 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/mockingo/mockingo-cli/internal/config"
 	"github.com/mockingo/mockingo-cli/internal/oauth"
-	"github.com/mockingo/mockingo-cli/pkg/tunnelprotocol"
+	"github.com/project-mockingo/mockingo-tunnel-protocol"
 )
 
 func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {

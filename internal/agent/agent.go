@@ -17,7 +17,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/mockingo/mockingo-cli/pkg/tunnelprotocol"
+	"github.com/mockingo/mockingo-cli/internal/tunnelhttp"
+	"github.com/project-mockingo/mockingo-tunnel-protocol"
 )
 
 type Config struct {
@@ -355,12 +356,12 @@ func (a *Agent) handleRequest(parent context.Context, writer *socketWriter, mess
 	}
 	body, err := base64.StdEncoding.DecodeString(message.BodyBase64)
 	if err != nil || len(body) > tunnelprotocol.MaxBodySize {
-		respondError("invalid_request")
+		respondError(tunnelprotocol.ErrorCodeInvalidRequest)
 		return
 	}
 	path, err := url.ParseRequestURI(message.Path)
 	if err != nil || path.Scheme != "" || path.Host != "" || len(path.Path) == 0 || path.Path[0] != '/' {
-		respondError("invalid_request")
+		respondError(tunnelprotocol.ErrorCodeInvalidRequest)
 		return
 	}
 	localURL := "http://127.0.0.1:" + strconv.Itoa(a.config.LocalPort) + path.RequestURI()
@@ -368,17 +369,17 @@ func (a *Agent) handleRequest(parent context.Context, writer *socketWriter, mess
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, message.Method, localURL, bytes.NewReader(body))
 	if err != nil {
-		respondError("invalid_request")
+		respondError(tunnelprotocol.ErrorCodeInvalidRequest)
 		return
 	}
-	request.Header = tunnelprotocol.FilterHeaders(http.Header(message.Headers))
+	request.Header = tunnelhttp.FilterHeaders(http.Header(message.Headers))
 	request.Host = "" // derive the local Host from the fixed URL above
 	response, err := a.client.Do(request)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			respondError("timeout")
+			respondError(tunnelprotocol.ErrorCodeTimeout)
 		} else {
-			respondError("local_unreachable")
+			respondError(tunnelprotocol.ErrorCodeLocalUnreachable)
 		}
 		return
 	}
@@ -386,16 +387,16 @@ func (a *Agent) handleRequest(parent context.Context, writer *socketWriter, mess
 	responseBody, err := tunnelprotocol.ReadBody(response.Body)
 	if err != nil {
 		if errors.Is(err, tunnelprotocol.ErrBodyTooLarge) {
-			respondError("response_too_large")
+			respondError(tunnelprotocol.ErrorCodeResponseTooLarge)
 		} else {
-			respondError("local_response_error")
+			respondError(tunnelprotocol.ErrorCodeLocalResponseError)
 		}
 		return
 	}
 	result := tunnelprotocol.Message{
 		Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeResponse,
 		RequestID: message.RequestID, Status: response.StatusCode,
-		Headers:    tunnelprotocol.FilterHeaders(response.Header),
+		Headers:    tunnelhttp.FilterHeaders(response.Header),
 		BodyBase64: base64.StdEncoding.EncodeToString(responseBody),
 	}
 	_ = writer.write(result)

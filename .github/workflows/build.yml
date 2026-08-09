@@ -44,7 +44,6 @@ jobs:
         run: |
           mkdir -p dist
           go build -trimpath -o "dist/mockingo-${GOOS}-${GOARCH}${{ matrix.extension }}" ./cmd/mockingo
-          go build -trimpath -o "dist/mockingo-gateway-${GOOS}-${GOARCH}${{ matrix.extension }}" ./cmd/mockingo-gateway
       - uses: actions/upload-artifact@v4
         with:
           name: mockingo-${{ matrix.goos }}-${{ matrix.goarch }}

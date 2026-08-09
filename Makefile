@@ -1,31 +1,20 @@
-.PHONY: build test fmt vet docker-build compose-config compose-up compose-down cross-build clean
+.PHONY: build test race fmt vet cross-build clean
 
 build:
 	mkdir -p bin
-	go build -o bin/mockingo ./cmd/mockingo
-	go build -o bin/mockingo-gateway ./cmd/mockingo-gateway
+	go build -trimpath -o bin/mockingo ./cmd/mockingo
 
 test:
 	go test ./...
 
+race:
+	go test -race ./...
+
 fmt:
-	gofmt -w $$(find cmd internal pkg -name '*.go')
+	gofmt -w $$(find cmd internal -name '*.go')
 
 vet:
 	go vet ./...
-
-docker-build:
-	docker build -f deploy/Dockerfile.gateway -t mockingo-gateway:latest .
-	docker build -f deploy/Dockerfile.caddy -t mockingo-caddy:latest .
-
-compose-config:
-	docker compose --env-file deploy/.env -f deploy/docker-compose.production.yml config --quiet
-
-compose-up:
-	docker compose --env-file deploy/.env -f deploy/docker-compose.production.yml up -d
-
-compose-down:
-	docker compose --env-file deploy/.env -f deploy/docker-compose.production.yml down
 
 cross-build:
 	mkdir -p dist
