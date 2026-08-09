@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mockingo/mockingo-cli/internal/agent"
+	"github.com/mockingo/mockingo-cli/internal/apiclient"
 	"github.com/mockingo/mockingo-cli/internal/config"
 	"github.com/mockingo/mockingo-cli/internal/naming"
 	"github.com/mockingo/mockingo-cli/internal/oauth"
@@ -76,6 +77,7 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "  mockingo expose --legacy --name NAME --http PORT  # deprecated compatibility mode")
 	fmt.Fprintln(a.Stdout, "  mockingo endpoints list [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo endpoints delete NAME [--force]")
 	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
@@ -113,11 +115,44 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
+		if !options.Legacy && errors.Is(err, config.ErrNotConfigured) {
+			return 1, apiclient.ErrNotSignedIn
+		}
 		return 1, fmt.Errorf("configuration error: %w", err)
 	}
-	legacyAPIURL, legacyToken, ok := cfg.Legacy()
-	if !ok {
-		return 1, errors.New("legacy gateway credentials are not configured; tunnel-ticket integration is deferred, so run 'mockingo login --api-url URL --token TOKEN'")
+	legacyAPIURL, legacyToken, hasLegacy := cfg.Legacy()
+	var controlClient *apiclient.Client
+	var identity apiclient.Me
+	if options.Legacy {
+		if !hasLegacy {
+			return 1, errors.New("legacy gateway credentials are not configured; run 'mockingo login --api-url URL --token TOKEN'")
+		}
+		fmt.Fprintln(a.Stderr, "Warning: legacy tunnel authentication is deprecated and will be removed.")
+	} else {
+		if cfg.OAuthIssuer == "" || cfg.OAuthClientID == "" || cfg.APIURL == "" {
+			return 1, apiclient.ErrNotSignedIn
+		}
+		metadata, discoverErr := oauth.Discover(ctx, a.httpClient(), cfg.OAuthIssuer)
+		if discoverErr != nil {
+			return 1, discoverErr
+		}
+		apiURL := cfg.APIURL
+		if options.APIURL != "" {
+			apiURL, err = validateAPIURL(options.APIURL)
+			if err != nil {
+				return 2, fmt.Errorf("invalid arguments: %w", err)
+			}
+		}
+		controlClient = &apiclient.Client{
+			HTTP: a.httpClient(), APIURL: apiURL, Issuer: cfg.OAuthIssuer,
+			ClientID: cfg.OAuthClientID, Scopes: strings.Fields(cfg.OAuthScopes), Metadata: metadata,
+			Store: a.credentialStore(path, options.AllowFileCredentials),
+		}
+		identity, err = controlClient.Me(ctx)
+		if err != nil {
+			return 1, err
+		}
+		fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -172,29 +207,99 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 	fmt.Fprintln(a.Stdout, "Application is ready.")
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	registration, err := agent.Register(runCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
-	if err != nil {
-		return 1, fmt.Errorf("gateway registration failure: %w", err)
+	initialConnected := make(chan struct{}, 1)
+	state := func(message string) {
+		fmt.Fprintln(a.Stdout, message)
+		if message == "Tunnel connected." || message == "Connected to Mockingo Gateway." {
+			select {
+			case initialConnected <- struct{}{}:
+			default:
+			}
+		}
 	}
-	fmt.Fprintf(a.Stdout, "Registering endpoint %s...\n", registration.Hostname)
-	state := func(message string) { fmt.Fprintln(a.Stdout, message) }
 	var verbose func(string, ...any)
 	if options.Verbose {
 		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
 	}
-	tunnelAgent := agent.New(agent.Config{
-		ConnectURL: registration.ConnectURL, SessionToken: registration.SessionToken,
-		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
-		OnState: state, Verbose: verbose, PublicURL: registration.PublicURL,
-		Reregister: func(registerCtx context.Context) (agent.Registration, error) {
-			return agent.Register(registerCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
-		},
-	})
+	var tunnelAgent *agent.Agent
+	var publicURL string
+	if options.Legacy {
+		httpClient := &http.Client{Timeout: 30 * time.Second}
+		registration, registerErr := agent.Register(runCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
+		if registerErr != nil {
+			return 1, fmt.Errorf("gateway registration failure: %w", registerErr)
+		}
+		publicURL = registration.PublicURL
+		fmt.Fprintf(a.Stdout, "Registering endpoint %s...\n", registration.Hostname)
+		tunnelAgent = agent.New(agent.Config{
+			ConnectURL: registration.ConnectURL, SessionToken: registration.SessionToken,
+			LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
+			OnState: state, Verbose: verbose, PublicURL: registration.PublicURL,
+			Reregister: func(registerCtx context.Context) (agent.Registration, error) {
+				return agent.Register(registerCtx, httpClient, legacyAPIURL, legacyToken, options.Name, options.HTTPPort)
+			},
+		})
+	} else {
+		request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: "http", LocalPort: options.HTTPPort, ProtocolVersion: options.ProtocolVersion}
+		validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
+		createSession := func(sessionCtx context.Context) (agent.Session, error) {
+			response, createErr := controlClient.CreateTunnelSession(sessionCtx, request, validation)
+			if createErr != nil {
+				return agent.Session{}, mapTunnelSessionError(options.Name, createErr)
+			}
+			return agent.Session{
+				EndpointID: response.Endpoint.ID, EndpointName: response.Endpoint.Name,
+				SessionID: response.Tunnel.SessionID, ConnectURL: response.Tunnel.ConnectURL,
+				Ticket: response.Tunnel.Ticket, PublicURL: response.Endpoint.PublicURL,
+			}, nil
+		}
+		initial, createErr := createSession(runCtx)
+		if createErr != nil {
+			return 1, createErr
+		}
+		publicURL = initial.PublicURL
+		fmt.Fprintf(a.Stdout, "✓ Endpoint reserved: %s\n", initial.EndpointName)
+		tunnelAgent = agent.New(agent.Config{
+			InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable, TemporaryConflict: apiclient.IsTemporarySessionConflict,
+			LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
+			OnState: state, Verbose: verbose, PublicURL: initial.PublicURL,
+			ReconnectEnabled: options.ReconnectEnabled, ReconnectInitialDelay: options.ReconnectInitialDelay,
+			ReconnectMaxDelay: options.ReconnectMaxDelay,
+		})
+	}
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- tunnelAgent.Run(runCtx) }()
 
-	fmt.Fprintf(a.Stdout, "\nPublic endpoint:\n%s\n\nPress Ctrl+C to stop.\n", registration.PublicURL)
+	if child == nil {
+		select {
+		case <-initialConnected:
+		case err := <-agentDone:
+			if err == nil {
+				return 0, nil
+			}
+			return 1, fmt.Errorf("tunnel connection failure: %w", err)
+		case <-runCtx.Done():
+			return 0, nil
+		}
+	} else {
+		select {
+		case <-initialConnected:
+		case result := <-child.Done():
+			cancel()
+			if result.Err != nil {
+				return exitCode(result), fmt.Errorf("process exited: %w", result.Err)
+			}
+			return result.Code, nil
+		case err := <-agentDone:
+			if err == nil {
+				return 0, nil
+			}
+			return 1, fmt.Errorf("tunnel connection failure: %w", err)
+		case <-runCtx.Done():
+			return 0, nil
+		}
+	}
+	fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, options.HTTPPort)
 	if child == nil {
 		select {
 		case err := <-agentDone:
@@ -221,6 +326,19 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	case <-runCtx.Done():
 		return 0, nil
 	}
+}
+
+func mapTunnelSessionError(name string, err error) error {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Problem.Code {
+		case "endpoint_name_unavailable":
+			return fmt.Errorf("The endpoint name %q is unavailable.\nChoose another name.", name)
+		case "invalid_endpoint_name":
+			return fmt.Errorf("invalid endpoint name %q", name)
+		}
+	}
+	return err
 }
 
 func (a *App) endpoints(ctx context.Context, args []string) (int, error) {

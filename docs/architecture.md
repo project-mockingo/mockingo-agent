@@ -21,11 +21,13 @@ The CLI always initiates the network connection. The user application remains on
 
 ## Control plane
 
-Stage 3E.1 supports two control paths. The preferred path has the CLI authenticate to the Spring Boot backend at `api.mockingo.com`, obtain a short-lived RS256 tunnel ticket, and open `gateway.mockingo.com/v1/connect`. The Go gateway validates locally against cached backend JWKS and reports lifecycle callbacks. The current `mockingo expose` still uses the legacy flow below until Stage 3E.2.
+The default path has the CLI authenticate to the Spring Boot backend at `api.mockingo.com`, obtain a short-lived RS256 tunnel ticket from `POST /api/v1/tunnel-sessions`, and open `gateway.mockingo.com/v1/connect`. The Go gateway validates locally against cached backend JWKS and reports lifecycle callbacks. Endpoint ownership comes only from the Clerk OAuth subject; the CLI sends no owner identity.
 
-`mockingo login` stores the gateway URL and API token in the operating system's user configuration directory. `mockingo expose` waits for the selected local port and calls `POST /api/v1/tunnels`. The gateway validates the name and returns a public URL, WebSocket connection URL, and a cryptographically random session token. The API token and tunnel session token are separate credentials.
+OAuth access tokens go only to Spring Boot. Each returned tunnel ticket goes only to the backend-selected, locally validated gateway URL and is consumed by one WebSocket dial attempt. After connection loss, the CLI never reuses the ticket: it waits with bounded jittered backoff, requests a new backend session, and dials with the new ticket. Temporary `tunnel_session_pending` and `endpoint_already_connected` races are retried while the previous gateway callback completes.
 
-Endpoint reservations live in PostgreSQL in production and remain until explicitly deleted. A temporary tunnel session lives only in gateway memory and a connected endpoint is exclusive. Stopping the CLI takes the endpoint offline without deleting it. A disconnected session can reconnect briefly; after expiry the CLI creates a fresh authenticated session for the same persistent endpoint and hostname.
+The old `POST /api/v1/tunnels` static-token path remains only behind explicit `mockingo expose --legacy` compatibility mode and never receives OAuth credentials.
+
+Endpoint reservations live in the Spring Boot control plane and remain until explicitly deleted. A connected endpoint is exclusive. Stopping the CLI takes the endpoint offline without deleting it. A disconnected ticket session never reconnects with its old credential; the CLI creates a fresh authenticated backend session for the same persistent endpoint and hostname.
 
 The gateway's ticket registry is indexed atomically by backend endpoint ID, session ID, endpoint name, and hostname. Internal management never uses endpoint name as identity. See [tunnel ticket authentication](tunnel-ticket-auth.md), [gateway internal API](gateway-internal-api.md), and [backend callbacks](backend-callbacks.md).
 

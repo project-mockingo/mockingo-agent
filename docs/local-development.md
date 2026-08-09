@@ -40,13 +40,13 @@ go run ./cmd/mockingo login \
   --api-url http://localhost:9090 \
   --token development-token
 
-go run ./cmd/mockingo expose --name demo --http 8080
+go run ./cmd/mockingo expose --legacy --name demo --http 8080
 ```
 
 Or let Mockingo start the application:
 
 ```bash
-go run ./cmd/mockingo expose \
+go run ./cmd/mockingo expose --legacy \
   --name spring-demo \
   --http 8080 \
   -- java -jar target/application.jar
@@ -73,4 +73,4 @@ Stop the CLI with Ctrl+C. If it started the application, it also terminates the 
 | `MOCKINGO_PUBLIC_SCHEME` | `https` | Public URL and forwarded scheme |
 | `MOCKINGO_TICKET_AUTH_ENABLED` | `true` | Enable backend ticket validation; set false for a legacy-only local demo |
 
-For a real-backend ticket test, start PostgreSQL and `mockingo-backend`, configure the backend's gateway connect URL as `ws://localhost:9090/v1/connect`, then run the gateway with development HTTP URLs, the fake/local JWKS URL, matching issuer/audience, callback token, internal token, and a stable instance ID. Authenticate to the backend, call `POST /api/v1/tunnel-sessions`, and use a temporary WebSocket client with `Authorization: Bearer <ticket>`. Verify the backend session and endpoint become connected, query the gateway batch status API, disconnect through the backend or gateway internal API, verify the disconnected/offline state, then test ticket reuse and a signing-key rotation. The current CLI remains on the legacy path and is verified separately.
+For a real-backend ticket test, start PostgreSQL and `mockingo-backend`, configure the backend's gateway connect URL as `ws://localhost:9090/v1/connect`, then run the gateway with development HTTP URLs, the local JWKS URL, matching issuer/audience, callback token, internal token, and a stable instance ID. Sign in with `mockingo login`, then run `mockingo expose --expected-gateway-host localhost --allow-insecure-gateway --name spring-demo --http 8080`. Verify the backend session and endpoint become connected, query the gateway batch status API, disconnect through the backend or gateway internal API, and verify expose obtains a new session ID and ticket before reconnecting. The legacy demo above is intentionally explicit and deprecated.

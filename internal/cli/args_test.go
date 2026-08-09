@@ -32,3 +32,15 @@ func TestParseExposePreservesCommandArguments(t *testing.T) {
 		t.Fatalf("command = %#v, want %#v", options.Command, want)
 	}
 }
+
+func TestLegacyExposeRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("MOCKINGO_LEGACY_EXPOSE_ENABLED", "false")
+	options, err := ParseExpose([]string{"--name", "demo", "--http", "8080"})
+	if err != nil || options.Legacy {
+		t.Fatalf("default options = %#v, %v", options, err)
+	}
+	options, err = ParseExpose([]string{"--name", "demo", "--http", "8080", "--legacy"})
+	if err != nil || !options.Legacy {
+		t.Fatalf("legacy options = %#v, %v", options, err)
+	}
+}

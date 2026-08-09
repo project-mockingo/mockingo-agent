@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,14 +21,36 @@ import (
 )
 
 type Config struct {
-	ConnectURL     string
-	SessionToken   string
-	LocalPort      int
-	RequestTimeout time.Duration
-	OnState        func(string)
-	Verbose        func(string, ...any)
-	Reregister     func(context.Context) (Registration, error)
-	PublicURL      string
+	ConnectURL            string
+	SessionToken          string
+	LocalPort             int
+	RequestTimeout        time.Duration
+	OnState               func(string)
+	Verbose               func(string, ...any)
+	Reregister            func(context.Context) (Registration, error)
+	PublicURL             string
+	InitialSession        *Session
+	AcquireSession        func(context.Context) (Session, error)
+	Retryable             func(error) bool
+	TemporaryConflict     func(error) bool
+	ReconnectEnabled      bool
+	ReconnectInitialDelay time.Duration
+	ReconnectMaxDelay     time.Duration
+}
+
+// Session contains an ephemeral backend-issued credential. Ticket is consumed
+// by exactly one DialContext call and must never be persisted or logged.
+type Session struct {
+	EndpointID   string
+	EndpointName string
+	SessionID    string
+	ConnectURL   string
+	Ticket       string
+	PublicURL    string
+}
+
+func (s Session) String() string {
+	return fmt.Sprintf("{EndpointID:%s EndpointName:%s SessionID:%s ConnectURL:%s Ticket:<redacted> PublicURL:%s}", s.EndpointID, s.EndpointName, s.SessionID, s.ConnectURL, s.PublicURL)
 }
 
 type Agent struct {
@@ -43,9 +68,17 @@ func New(config Config) *Agent {
 	return &Agent{config: config, client: client}
 }
 
-// Run reconnects until its parent context is cancelled. It first reuses the
-// temporary session and obtains a fresh one through Reregister after expiry.
+// Run owns the connection state machine until its parent context is cancelled.
+// Ticket mode acquires a fresh backend session before every reconnect attempt;
+// legacy mode preserves the transitional registration behavior.
 func (a *Agent) Run(ctx context.Context) error {
+	if a.config.AcquireSession != nil {
+		return a.runTicket(ctx)
+	}
+	return a.runLegacy(ctx)
+}
+
+func (a *Agent) runLegacy(ctx context.Context) error {
 	delay := time.Second
 	connectedOnce := false
 	for {
@@ -53,7 +86,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		}
 		headers := http.Header{"Authorization": []string{"Bearer " + a.config.SessionToken}}
-		ws, response, err := websocket.DefaultDialer.DialContext(ctx, a.config.ConnectURL, headers)
+		ws, response, err := dialWebSocket(ctx, a.config.ConnectURL, headers)
 		status := 0
 		if response != nil {
 			status = response.StatusCode
@@ -110,6 +143,208 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
+type GatewayError struct {
+	Status int
+	Code   string
+}
+
+func (e *GatewayError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("gateway rejected tunnel connection (HTTP %d, code %s)", e.Status, e.Code)
+	}
+	return fmt.Sprintf("gateway rejected tunnel connection (HTTP %d)", e.Status)
+}
+
+func (a *Agent) runTicket(ctx context.Context) error {
+	initialDelay := a.config.ReconnectInitialDelay
+	if initialDelay <= 0 {
+		initialDelay = time.Second
+	}
+	maxDelay := a.config.ReconnectMaxDelay
+	if maxDelay < initialDelay {
+		maxDelay = 30 * time.Second
+	}
+	reconnectEnabled := a.config.ReconnectEnabled
+	delay := initialDelay
+	connectedOnce := false
+	first := true
+	pendingMessageShown := false
+	var next *Session
+	if a.config.InitialSession != nil {
+		copy := *a.config.InitialSession
+		a.config.InitialSession.Ticket = ""
+		next = &copy
+	}
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		var session Session
+		if next != nil {
+			session = *next
+			next = nil
+		} else {
+			var err error
+			session, err = a.config.AcquireSession(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				if a.config.Retryable == nil || !a.config.Retryable(err) {
+					return err
+				}
+				if !reconnectEnabled && !first {
+					return err
+				}
+				if !pendingMessageShown && a.config.OnState != nil {
+					if a.config.TemporaryConflict != nil && a.config.TemporaryConflict(err) {
+						a.config.OnState("Waiting for the previous tunnel session to close...")
+					} else {
+						a.config.OnState("Mockingo control plane unavailable. Retrying...")
+					}
+					pendingMessageShown = true
+				}
+				if a.config.Verbose != nil {
+					a.config.Verbose("tunnel session request failed: %v", err)
+				}
+				if err := waitBackoff(ctx, delay); err != nil {
+					return nil
+				}
+				delay = nextDelayMax(delay, maxDelay)
+				first = false
+				continue
+			}
+		}
+		first = false
+		pendingMessageShown = false
+		headers := http.Header{"Authorization": []string{"Bearer " + session.Ticket}}
+		session.Ticket = ""
+		ws, response, dialErr := dialWebSocket(ctx, session.ConnectURL, headers)
+		headers.Del("Authorization")
+		gatewayErr := decodeGatewayError(response)
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		if dialErr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if gatewayErr != nil && !retryableGatewayError(gatewayErr, dialErr) {
+				return gatewayErr
+			}
+			if !reconnectEnabled {
+				if gatewayErr != nil {
+					return gatewayErr
+				}
+				return fmt.Errorf("connect to gateway: %w", dialErr)
+			}
+			if a.config.Verbose != nil {
+				a.config.Verbose("gateway connection attempt failed (status %d)", gatewayStatus(gatewayErr))
+			}
+			if err := waitBackoff(ctx, delay); err != nil {
+				return nil
+			}
+			delay = nextDelayMax(delay, maxDelay)
+			continue
+		}
+		delay = initialDelay
+		if connectedOnce && a.config.OnState != nil {
+			a.config.OnState("Tunnel reconnected.")
+		} else if a.config.OnState != nil {
+			a.config.OnState("Tunnel connected.")
+		}
+		connectedOnce = true
+		err := a.serveConnection(ctx, ws)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !reconnectEnabled {
+			return fmt.Errorf("tunnel disconnected: %w", err)
+		}
+		if a.config.OnState != nil {
+			a.config.OnState("Connection lost. Reconnecting...")
+		}
+		if a.config.Verbose != nil && err != nil {
+			a.config.Verbose("tunnel disconnected: %v", err)
+		}
+		if err := waitBackoff(ctx, delay); err != nil {
+			return nil
+		}
+		delay = nextDelayMax(delay, maxDelay)
+	}
+}
+
+// dialWebSocket closes the underlying socket when the owning context is
+// cancelled, including while a peer stalls after TCP connect but before the
+// WebSocket upgrade completes. Copying DefaultDialer preserves proxy and TLS
+// behavior without mutating global state.
+func dialWebSocket(ctx context.Context, connectURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
+	dialer := *websocket.DefaultDialer
+	baseDial := dialer.NetDialContext
+	if baseDial == nil {
+		networkDialer := &net.Dialer{Timeout: dialer.HandshakeTimeout}
+		baseDial = networkDialer.DialContext
+	}
+	dialDone := make(chan struct{})
+	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, err := baseDial(dialCtx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = conn.Close()
+			case <-dialDone:
+			}
+		}()
+		return conn, nil
+	}
+	ws, response, err := dialer.DialContext(ctx, connectURL, headers)
+	close(dialDone)
+	return ws, response, err
+}
+
+func decodeGatewayError(response *http.Response) *GatewayError {
+	if response == nil {
+		return nil
+	}
+	value := struct {
+		Code string `json:"code"`
+	}{}
+	if response.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&value)
+	}
+	for _, r := range value.Code {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			value.Code = ""
+			break
+		}
+	}
+	return &GatewayError{Status: response.StatusCode, Code: value.Code}
+}
+
+func gatewayStatus(err *GatewayError) int {
+	if err == nil {
+		return 0
+	}
+	return err.Status
+}
+
+func retryableGatewayError(gatewayErr *GatewayError, dialErr error) bool {
+	if gatewayErr == nil {
+		var netErr interface{ Temporary() bool }
+		return errors.As(dialErr, &netErr) || dialErr != nil
+	}
+	if gatewayErr.Status >= 500 || gatewayErr.Status == http.StatusUnauthorized {
+		return true
+	}
+	if gatewayErr.Status == http.StatusConflict {
+		return gatewayErr.Code == "endpoint_already_connected" || gatewayErr.Code == "tunnel_session_replayed"
+	}
+	return false
+}
+
 func waitBackoff(ctx context.Context, base time.Duration) error {
 	jitter := time.Duration(rand.Int63n(int64(base/2) + 1))
 	timer := time.NewTimer(base + jitter)
@@ -123,9 +358,13 @@ func waitBackoff(ctx context.Context, base time.Duration) error {
 }
 
 func nextDelay(current time.Duration) time.Duration {
+	return nextDelayMax(current, 15*time.Second)
+}
+
+func nextDelayMax(current, maximum time.Duration) time.Duration {
 	next := current * 2
-	if next > 15*time.Second {
-		return 15 * time.Second
+	if next > maximum {
+		return maximum
 	}
 	return next
 }

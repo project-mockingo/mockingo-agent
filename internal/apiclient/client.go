@@ -42,7 +42,10 @@ type Me struct {
 	AuthenticationMethod string `json:"authenticationMethod"`
 }
 
-var ErrSignedOut = errors.New("Your Mockingo session has expired.\nRun: mockingo login")
+var (
+	ErrNotSignedIn = errors.New("You are not signed in to Mockingo.\n\nRun:\n  mockingo login")
+	ErrSignedOut   = errors.New("Your Mockingo session has expired.\n\nRun:\n  mockingo login")
+)
 
 func (c *Client) defaults() {
 	c.defaultsOnce.Do(func() {
@@ -64,7 +67,7 @@ func (c *Client) credentials(ctx context.Context, forceRefresh bool) (oauth.OAut
 	credentials, err := c.Store.Get(account)
 	if err != nil {
 		if errors.Is(err, oauth.ErrCredentialsNotFound) {
-			return oauth.OAuthCredentials{}, ErrSignedOut
+			return oauth.OAuthCredentials{}, ErrNotSignedIn
 		}
 		return oauth.OAuthCredentials{}, err
 	}
@@ -77,7 +80,10 @@ func (c *Client) credentials(ctx context.Context, forceRefresh bool) (oauth.OAut
 	// Re-read after waiting so concurrent requests reuse the rotated token.
 	latest, err := c.Store.Get(account)
 	if err != nil {
-		return oauth.OAuthCredentials{}, ErrSignedOut
+		if errors.Is(err, oauth.ErrCredentialsNotFound) {
+			return oauth.OAuthCredentials{}, ErrNotSignedIn
+		}
+		return oauth.OAuthCredentials{}, err
 	}
 	if !forceRefresh && c.Now().Add(c.ExpirySkew).Before(latest.ExpiresAt) {
 		return latest, nil
@@ -120,6 +126,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) (*htt
 		}
 		req.Header.Set("Authorization", "Bearer "+credentials.AccessToken)
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Cache-Control", "no-store")
 		httpClient := *c.HTTP
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		response, err := httpClient.Do(req)
