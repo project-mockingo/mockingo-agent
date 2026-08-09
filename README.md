@@ -28,8 +28,6 @@ TEST_DATABASE_URL='postgres://mockingo:test-password@localhost:5432/mockingo_tes
 ## Public usage
 
 ```bash
-export MOCKINGO_OAUTH_ISSUER=https://your-instance.clerk.accounts.dev
-export MOCKINGO_OAUTH_CLIENT_ID=client_your_public_oauth_client_id
 mockingo login
 mockingo whoami
 
@@ -58,8 +56,8 @@ Default configuration:
 
 ```text
 MOCKINGO_API_URL=https://api.mockingo.com
-MOCKINGO_OAUTH_ISSUER=<Clerk Frontend API URL>
-MOCKINGO_OAUTH_CLIENT_ID=<public OAuth client ID>
+MOCKINGO_OAUTH_ISSUER=https://teaching-wolf-20.clerk.accounts.dev
+MOCKINGO_OAUTH_CLIENT_ID=p7M2nCmzjbRO88ns
 MOCKINGO_OAUTH_SCOPES=openid profile email offline_access
 MOCKINGO_OAUTH_CALLBACK_HOST=127.0.0.1
 MOCKINGO_OAUTH_CALLBACK_PORT=53682
@@ -67,7 +65,7 @@ MOCKINGO_OAUTH_CALLBACK_PATH=/oauth/callback
 MOCKINGO_LOGIN_TIMEOUT=5m
 ```
 
-CLI flags override environment variables, which override saved non-secret configuration and built-in defaults. Useful login flags are `--api-url`, `--issuer`, `--client-id`, `--callback-port`, `--no-browser`, and `--force`.
+`mockingo login` uses Mockingo's built-in production OAuth configuration. CLI flags override environment variables, which override saved non-secret configuration and built-in defaults. The `--issuer` and `--client-id` overrides remain available for local development and testing. Other useful login flags are `--api-url`, `--callback-port`, `--no-browser`, and `--force`.
 
 The browser flow generates a new high-entropy state, nonce, and PKCE verifier for every attempt. After consent, the CLI exchanges the one-time code at the discovered token endpoint and calls `GET https://api.mockingo.com/api/v1/me`. Credentials are saved only after the backend confirms `clerk_oauth` authentication.
 

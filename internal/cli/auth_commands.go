@@ -21,11 +21,13 @@ import (
 )
 
 const (
-	defaultAPIURL       = "https://api.mockingo.com"
-	defaultCallbackHost = "127.0.0.1"
-	defaultCallbackPort = 53682
-	defaultCallbackPath = "/oauth/callback"
-	defaultScopes       = "openid profile email offline_access"
+	defaultAPIURL        = "https://api.mockingo.com"
+	defaultOAuthIssuer   = "https://teaching-wolf-20.clerk.accounts.dev"
+	defaultOAuthClientID = "p7M2nCmzjbRO88ns"
+	defaultCallbackHost  = "127.0.0.1"
+	defaultCallbackPort  = 53682
+	defaultCallbackPath  = "/oauth/callback"
+	defaultScopes        = "openid profile email offline_access"
 )
 
 type loginOptions struct {
@@ -102,8 +104,8 @@ func parseLoginOptions(args []string, existing config.Config, stderr io.Writer) 
 	}
 	options := loginOptions{
 		APIURL:       envString("MOCKINGO_API_URL", apiDefault),
-		Issuer:       envString("MOCKINGO_OAUTH_ISSUER", existing.OAuthIssuer),
-		ClientID:     envString("MOCKINGO_OAUTH_CLIENT_ID", existing.OAuthClientID),
+		Issuer:       envString("MOCKINGO_OAUTH_ISSUER", firstNonEmpty(existing.OAuthIssuer, defaultOAuthIssuer)),
+		ClientID:     envString("MOCKINGO_OAUTH_CLIENT_ID", firstNonEmpty(existing.OAuthClientID, defaultOAuthClientID)),
 		Scopes:       envString("MOCKINGO_OAUTH_SCOPES", existing.OAuthScopes),
 		CallbackHost: envString("MOCKINGO_OAUTH_CALLBACK_HOST", defaultCallbackHost),
 		CallbackPath: envString("MOCKINGO_OAUTH_CALLBACK_PATH", defaultCallbackPath),
@@ -136,6 +138,15 @@ func parseLoginOptions(args []string, existing config.Config, stderr io.Writer) 
 		return loginOptions{}, errors.New("invalid arguments: login does not accept positional arguments")
 	}
 	return options, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func validateAPIURL(raw string) (string, error) {
