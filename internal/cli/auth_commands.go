@@ -21,13 +21,10 @@ import (
 )
 
 const (
-	defaultAPIURL        = "https://api.mockingo.com"
-	defaultOAuthIssuer   = "https://teaching-wolf-20.clerk.accounts.dev"
-	defaultOAuthClientID = "p7M2nCmzjbRO88ns"
-	defaultCallbackHost  = "127.0.0.1"
-	defaultCallbackPort  = 53682
-	defaultCallbackPath  = "/oauth/callback"
-	defaultScopes        = "openid profile email offline_access"
+	defaultAPIURL       = "https://api.mockingo.com"
+	defaultCallbackHost = "127.0.0.1"
+	defaultCallbackPort = 53682
+	defaultCallbackPath = "/oauth/callback"
 )
 
 type loginOptions struct {
@@ -35,6 +32,7 @@ type loginOptions struct {
 	CallbackPort                                                 int
 	Timeout                                                      time.Duration
 	NoBrowser, Force, AllowFile                                  bool
+	IssuerExplicit, ClientIDExplicit, ScopesExplicit             bool
 }
 
 func envString(name, fallback string) string {
@@ -97,28 +95,29 @@ func parseLoginOptions(args []string, existing config.Config, stderr io.Writer) 
 		return loginOptions{}, err
 	}
 	apiDefault := existing.APIURL
-	if existing.OAuthIssuer == "" || apiDefault == "" {
+	if apiDefault == "" {
 		apiDefault = defaultAPIURL
 	}
 	options := loginOptions{
-		APIURL:       envString("MOCKINGO_API_URL", apiDefault),
-		Issuer:       envString("MOCKINGO_OAUTH_ISSUER", firstNonEmpty(existing.OAuthIssuer, defaultOAuthIssuer)),
-		ClientID:     envString("MOCKINGO_OAUTH_CLIENT_ID", firstNonEmpty(existing.OAuthClientID, defaultOAuthClientID)),
-		Scopes:       envString("MOCKINGO_OAUTH_SCOPES", existing.OAuthScopes),
-		CallbackHost: envString("MOCKINGO_OAUTH_CALLBACK_HOST", defaultCallbackHost),
-		CallbackPath: envString("MOCKINGO_OAUTH_CALLBACK_PATH", defaultCallbackPath),
-		CallbackPort: port,
-		Timeout:      timeout,
-		AllowFile:    strings.EqualFold(os.Getenv("MOCKINGO_ALLOW_FILE_CREDENTIALS"), "true"),
-	}
-	if options.Scopes == "" {
-		options.Scopes = defaultScopes
+		APIURL:           envString("MOCKINGO_API_URL", apiDefault),
+		Issuer:           envString("MOCKINGO_OAUTH_ISSUER", existing.OAuthIssuer),
+		ClientID:         envString("MOCKINGO_OAUTH_CLIENT_ID", existing.OAuthClientID),
+		Scopes:           envString("MOCKINGO_OAUTH_SCOPES", existing.OAuthScopes),
+		CallbackHost:     envString("MOCKINGO_OAUTH_CALLBACK_HOST", defaultCallbackHost),
+		CallbackPath:     envString("MOCKINGO_OAUTH_CALLBACK_PATH", defaultCallbackPath),
+		CallbackPort:     port,
+		Timeout:          timeout,
+		AllowFile:        strings.EqualFold(os.Getenv("MOCKINGO_ALLOW_FILE_CREDENTIALS"), "true"),
+		IssuerExplicit:   strings.TrimSpace(os.Getenv("MOCKINGO_OAUTH_ISSUER")) != "",
+		ClientIDExplicit: strings.TrimSpace(os.Getenv("MOCKINGO_OAUTH_CLIENT_ID")) != "",
+		ScopesExplicit:   strings.TrimSpace(os.Getenv("MOCKINGO_OAUTH_SCOPES")) != "",
 	}
 	set := flag.NewFlagSet("login", flag.ContinueOnError)
 	set.SetOutput(stderr)
 	set.StringVar(&options.APIURL, "api-url", options.APIURL, "Mockingo control-plane API URL")
 	set.StringVar(&options.Issuer, "issuer", options.Issuer, "Clerk Frontend API issuer URL")
 	set.StringVar(&options.ClientID, "client-id", options.ClientID, "public OAuth client ID")
+	set.StringVar(&options.Scopes, "scopes", options.Scopes, "space-separated OAuth scopes")
 	set.IntVar(&options.CallbackPort, "callback-port", options.CallbackPort, "loopback callback port (0 requests an ephemeral port)")
 	set.BoolVar(&options.NoBrowser, "no-browser", false, "print the authorization URL without opening a browser")
 	set.BoolVar(&options.Force, "force", false, "authenticate again even when already signed in")
@@ -129,16 +128,17 @@ func parseLoginOptions(args []string, existing config.Config, stderr io.Writer) 
 	if set.NArg() != 0 {
 		return loginOptions{}, errors.New("invalid arguments: login does not accept positional arguments")
 	}
-	return options, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
+	set.Visit(func(option *flag.Flag) {
+		switch option.Name {
+		case "issuer":
+			options.IssuerExplicit = true
+		case "client-id":
+			options.ClientIDExplicit = true
+		case "scopes":
+			options.ScopesExplicit = true
 		}
-	}
-	return ""
+	})
+	return options, nil
 }
 
 func validateAPIURL(raw string) (string, error) {
@@ -166,8 +166,23 @@ func (a *App) login(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("configuration error: %w", err)
 	}
+	if !options.IssuerExplicit || !options.ClientIDExplicit || !options.ScopesExplicit {
+		configuration, discoverErr := apiclient.DiscoverLoginConfiguration(ctx, a.httpClient(), apiURL)
+		if discoverErr != nil {
+			return fmt.Errorf("discover OAuth configuration from %s: %w", apiURL, discoverErr)
+		}
+		if !options.IssuerExplicit {
+			options.Issuer = configuration.Issuer
+		}
+		if !options.ClientIDExplicit {
+			options.ClientID = configuration.ClientID
+		}
+		if !options.ScopesExplicit {
+			options.Scopes = strings.Join(configuration.Scopes, " ")
+		}
+	}
 	if options.Issuer == "" || options.ClientID == "" {
-		return errors.New("configuration error: OAuth issuer and public client ID are required; set MOCKINGO_OAUTH_ISSUER and MOCKINGO_OAUTH_CLIENT_ID or use --issuer and --client-id")
+		return errors.New("configuration error: OAuth issuer and public client ID are required")
 	}
 	scopes := strings.Fields(options.Scopes)
 	if len(scopes) == 0 {

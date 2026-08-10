@@ -11,17 +11,21 @@ import (
 	"github.com/mockingo/mockingo-agent/internal/config"
 )
 
-func TestParseLoginOptionsUsesProductionDefaultsWithoutArguments(t *testing.T) {
+func TestParseLoginOptionsUsesProductionAPIWithoutEmbeddingOAuthEnvironment(t *testing.T) {
 	t.Setenv("MOCKINGO_API_URL", "")
 	t.Setenv("MOCKINGO_OAUTH_ISSUER", "")
 	t.Setenv("MOCKINGO_OAUTH_CLIENT_ID", "")
+	t.Setenv("MOCKINGO_OAUTH_SCOPES", "")
 
 	options, err := parseLoginOptions(nil, config.Config{}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.APIURL != defaultAPIURL || options.Issuer != defaultOAuthIssuer || options.ClientID != defaultOAuthClientID {
+	if options.APIURL != defaultAPIURL || options.Issuer != "" || options.ClientID != "" || options.Scopes != "" {
 		t.Fatalf("unexpected defaults: %#v", options)
+	}
+	if options.IssuerExplicit || options.ClientIDExplicit || options.ScopesExplicit {
+		t.Fatalf("unexpected explicit OAuth options: %#v", options)
 	}
 }
 
@@ -45,6 +49,7 @@ func TestParseLoginOptionsPrefersSavedOAuthConfiguration(t *testing.T) {
 	t.Setenv("MOCKINGO_API_URL", "")
 	t.Setenv("MOCKINGO_OAUTH_ISSUER", "")
 	t.Setenv("MOCKINGO_OAUTH_CLIENT_ID", "")
+	t.Setenv("MOCKINGO_OAUTH_SCOPES", "")
 	existing := config.Config{
 		APIURL:        "https://api.saved.example",
 		OAuthIssuer:   "https://issuer.saved.example",
@@ -57,5 +62,18 @@ func TestParseLoginOptionsPrefersSavedOAuthConfiguration(t *testing.T) {
 	}
 	if options.APIURL != existing.APIURL || options.Issuer != existing.OAuthIssuer || options.ClientID != existing.OAuthClientID {
 		t.Fatalf("saved configuration was not preserved: %#v", options)
+	}
+}
+
+func TestParseLoginOptionsMarksOAuthOverridesExplicit(t *testing.T) {
+	t.Setenv("MOCKINGO_OAUTH_ISSUER", "https://issuer.env.example")
+	t.Setenv("MOCKINGO_OAUTH_CLIENT_ID", "client_env")
+	t.Setenv("MOCKINGO_OAUTH_SCOPES", "openid")
+	options, err := parseLoginOptions([]string{"--issuer", "https://issuer.flag.example", "--client-id", "client_flag", "--scopes", "openid profile"}, config.Config{}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.IssuerExplicit || !options.ClientIDExplicit || !options.ScopesExplicit {
+		t.Fatalf("overrides not marked explicit: %#v", options)
 	}
 }

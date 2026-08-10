@@ -26,6 +26,13 @@ Windows Credential Manager, macOS Keychain, or Linux Secret Service. Owner-only
 fallback file storage requires `--allow-insecure-storage` or
 `MOCKINGO_ALLOW_FILE_CREDENTIALS=true`.
 
+With no OAuth arguments, `mockingo login` retrieves the issuer, public client
+ID, and scopes from `https://api.mockingo.com/.well-known/mockingo-agent.json`.
+For a different deployment, pass `--api-url` or set `MOCKINGO_API_URL`; explicit
+`--issuer`, `--client-id`, `--scopes`, `MOCKINGO_OAUTH_ISSUER`,
+`MOCKINGO_OAUTH_CLIENT_ID`, and `MOCKINGO_OAUTH_SCOPES` values override fields
+advertised by the control plane.
+
 `mockingo expose` sends the OAuth access token only to the Spring Boot control
 plane. It validates the returned gateway URL and sends the returned one-use
 tunnel ticket only to `/v1/connect`. Every reconnect requests a new backend

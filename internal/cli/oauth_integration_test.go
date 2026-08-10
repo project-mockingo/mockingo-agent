@@ -57,13 +57,6 @@ type oauthFixture struct {
 
 func newOAuthFixture(t *testing.T, deny bool) oauthFixture {
 	t.Helper()
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/me" || r.Header.Get("Authorization") != "Bearer access-token" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"userId": "user_123", "authenticationMethod": "clerk_oauth"})
-	}))
 	var issuer *httptest.Server
 	issuer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -92,6 +85,20 @@ func newOAuthFixture(t *testing.T, deny bool) oauthFixture {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/mockingo-agent.json":
+			json.NewEncoder(w).Encode(map[string]any{"issuer": issuer.URL, "clientId": "client_123", "scopes": []string{"openid", "profile", "email", "offline_access"}})
+		case "/api/v1/me":
+			if r.Header.Get("Authorization") != "Bearer access-token" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"userId": "user_123", "authenticationMethod": "clerk_oauth"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
 	t.Cleanup(api.Close)
 	t.Cleanup(issuer.Close)
 	return oauthFixture{issuer: issuer, api: api, client: issuer.Client()}
@@ -101,6 +108,9 @@ func TestOAuthLoginWhoamiJSONAndLogout(t *testing.T) {
 	fixture := newOAuthFixture(t, false)
 	store := newCLIStore()
 	path := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Save(path, config.Config{APIURL: fixture.api.URL, OAuthIssuer: "https://development.clerk.accounts.dev", OAuthClientID: "stale-development-client", OAuthScopes: "openid"}); err != nil {
+		t.Fatal(err)
+	}
 	var output bytes.Buffer
 	app := &App{Stdout: &output, Stderr: &output, Stdin: bytes.NewReader(nil), ConfigPath: path, HTTPClient: fixture.client, Credentials: store}
 	app.OpenBrowser = func(target string) error {
@@ -110,12 +120,12 @@ func TestOAuthLoginWhoamiJSONAndLogout(t *testing.T) {
 		}
 		return err
 	}
-	args := []string{"login", "--api-url", fixture.api.URL, "--issuer", fixture.issuer.URL, "--client-id", "client_123", "--callback-port", "0"}
+	args := []string{"login", "--api-url", fixture.api.URL, "--callback-port", "0"}
 	if code := app.Run(context.Background(), args); code != 0 {
 		t.Fatalf("login code = %d\n%s", code, output.String())
 	}
 	cfg, err := config.Load(path)
-	if err != nil || cfg.UserID != "user_123" {
+	if err != nil || cfg.UserID != "user_123" || cfg.OAuthIssuer != fixture.issuer.URL || cfg.OAuthClientID != "client_123" {
 		t.Fatalf("config = %#v, %v", cfg, err)
 	}
 	output.Reset()
