@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mockingo/mockingo-cli/internal/oauth"
+	"github.com/mockingo/mockingo-agent/internal/oauth"
 )
 
 func validTunnelResponse(now time.Time) TunnelSessionResponse {

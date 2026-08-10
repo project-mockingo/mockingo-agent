@@ -47,7 +47,7 @@ the parent `go.work`:
 ```text
 workspace/
   go.work
-  mockingo-cli/
+  mockingo-agent/
   mockingo-gateway/
   mockingo-tunnel-protocol/
 ```

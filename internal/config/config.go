@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mockingo/mockingo-cli/internal/atomicfile"
+	"github.com/mockingo/mockingo-agent/internal/atomicfile"
 )
 
 // Config contains non-secret OAuth metadata. OAuth access and refresh tokens

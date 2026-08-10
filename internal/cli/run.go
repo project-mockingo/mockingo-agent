@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mockingo/mockingo-cli/internal/agent"
-	"github.com/mockingo/mockingo-cli/internal/apiclient"
-	"github.com/mockingo/mockingo-cli/internal/config"
-	"github.com/mockingo/mockingo-cli/internal/naming"
-	"github.com/mockingo/mockingo-cli/internal/oauth"
-	"github.com/mockingo/mockingo-cli/internal/process"
-	"github.com/mockingo/mockingo-cli/internal/readiness"
+	"github.com/mockingo/mockingo-agent/internal/agent"
+	"github.com/mockingo/mockingo-agent/internal/apiclient"
+	"github.com/mockingo/mockingo-agent/internal/config"
+	"github.com/mockingo/mockingo-agent/internal/naming"
+	"github.com/mockingo/mockingo-agent/internal/oauth"
+	"github.com/mockingo/mockingo-agent/internal/process"
+	"github.com/mockingo/mockingo-agent/internal/readiness"
 )
 
 type App struct {

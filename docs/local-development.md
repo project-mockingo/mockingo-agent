@@ -6,7 +6,7 @@ prepared for its first remote tag:
 ```bash
 cd ..
 go work sync
-cd mockingo-cli
+cd mockingo-agent
 go test ./...
 go run ./cmd/mockingo login
 go run ./cmd/mockingo expose --expected-gateway-host localhost --allow-insecure-gateway --name spring-demo --http 8080

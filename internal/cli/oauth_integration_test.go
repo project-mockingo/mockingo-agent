@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mockingo/mockingo-cli/internal/config"
-	"github.com/mockingo/mockingo-cli/internal/oauth"
+	"github.com/mockingo/mockingo-agent/internal/config"
+	"github.com/mockingo/mockingo-agent/internal/oauth"
 )
 
 type cliMemoryStore struct {

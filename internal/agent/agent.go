@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/mockingo/mockingo-cli/internal/tunnelhttp"
+	"github.com/mockingo/mockingo-agent/internal/tunnelhttp"
 	"github.com/project-mockingo/mockingo-tunnel-protocol"
 )
 

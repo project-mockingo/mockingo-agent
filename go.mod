@@ -1,4 +1,4 @@
-module github.com/mockingo/mockingo-cli
+module github.com/mockingo/mockingo-agent
 
 go 1.25.0
 
