@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mockingo/mockingo-agent/internal/oauth"
+	"github.com/project-mockingo/mockingo-agent/internal/oauth"
 )
 
 const maxResponseSize = 1 << 20

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mockingo/mockingo-agent/internal/config"
+	"github.com/project-mockingo/mockingo-agent/internal/config"
 )
 
 func TestParseLoginOptionsUsesProductionAPIWithoutEmbeddingOAuthEnvironment(t *testing.T) {

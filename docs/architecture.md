@@ -20,5 +20,6 @@ terminal output.
 
 The separate gateway owns ticket verification, JWKS, replay protection, active
 registries, wildcard public routing, callbacks, internal APIs, PostgreSQL
-catalog reads, health, metrics, and shutdown. Shared wire DTOs and limits come
-only from `github.com/project-mockingo/mockingo-tunnel-protocol`.
+catalog reads, health, metrics, and shutdown. Shared wire DTOs, validation, and
+limits come from the public
+`github.com/project-mockingo/mockingo-agent/tunnelprotocol` package.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mockingo/mockingo-agent/internal/oauth"
+	"github.com/project-mockingo/mockingo-agent/internal/oauth"
 )
 
 type memoryStore struct {

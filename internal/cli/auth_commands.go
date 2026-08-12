@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mockingo/mockingo-agent/internal/apiclient"
-	"github.com/mockingo/mockingo-agent/internal/config"
-	"github.com/mockingo/mockingo-agent/internal/oauth"
+	"github.com/project-mockingo/mockingo-agent/internal/apiclient"
+	"github.com/project-mockingo/mockingo-agent/internal/config"
+	"github.com/project-mockingo/mockingo-agent/internal/oauth"
 )
 
 const (

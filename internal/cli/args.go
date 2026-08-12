@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/project-mockingo/mockingo-tunnel-protocol"
+	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
 type envFlags []string

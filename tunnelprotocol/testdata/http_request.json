@@ -1,0 +1,1 @@
+{"version":1,"type":"request","requestId":"0123456789abcdef","method":"POST","path":"/widgets?q=1","headers":{"Content-Type":["application/json"],"X-Test":["one","two"]},"bodyBase64":"eyJuYW1lIjoibW9ja2luZ28ifQ=="}

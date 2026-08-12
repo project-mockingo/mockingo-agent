@@ -41,24 +41,24 @@ session and ticket; tickets are never persisted or logged.
 Static gateway tokens, direct gateway endpoint CRUD, direct registration, and
 legacy token login/expose modes are not supported.
 
-## Protocol and gateway dependency
+## Tunnel protocol
 
-The local agent consumes
-`github.com/project-mockingo/mockingo-tunnel-protocol v0.1.0`, whose on-wire version
-remains 1. It expects the external gateway URL returned by the control plane;
-the production gateway is `wss://gateway.mockingo.com/v1/connect`.
+The public `tunnelprotocol` package in this module is the canonical Go
+definition of the versioned wire contract shared with the private gateway.
+Its on-wire version remains 1. The agent expects the external gateway URL
+returned by the control plane; the production gateway is
+`wss://gateway.mockingo.com/v1/connect`.
 
-For sibling-repository development before the protocol tag is published, use
-the parent `go.work`:
+For sibling-repository development, use the parent `go.work`:
 
 ```text
 workspace/
   go.work
   mockingo-agent/
   mockingo-gateway/
-  mockingo-tunnel-protocol/
 ```
 
+The gateway imports `github.com/project-mockingo/mockingo-agent/tunnelprotocol`.
 No release `go.mod` contains a local filesystem `replace`.
 
 ## Build and verify

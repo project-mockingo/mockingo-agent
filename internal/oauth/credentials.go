@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mockingo/mockingo-agent/internal/atomicfile"
+	"github.com/project-mockingo/mockingo-agent/internal/atomicfile"
 	keyring "github.com/zalando/go-keyring"
 )
 

@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/mockingo/mockingo-agent/internal/tunnelhttp"
-	"github.com/project-mockingo/mockingo-tunnel-protocol"
+	"github.com/project-mockingo/mockingo-agent/internal/tunnelhttp"
+	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
 type Config struct {

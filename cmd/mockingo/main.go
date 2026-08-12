@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mockingo/mockingo-agent/internal/cli"
+	"github.com/project-mockingo/mockingo-agent/internal/cli"
 )
 
 func main() {
