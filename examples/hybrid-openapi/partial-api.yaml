@@ -1,0 +1,31 @@
+openapi: 3.0.3
+info:
+  title: Partial Weather Replacement
+  version: 1.0.0
+paths:
+  /weather:
+    get:
+      responses:
+        '200':
+          description: Current weather
+          content:
+            application/json:
+              example:
+                city: Prague
+                temperature: 23
+  /weather/{city}:
+    get:
+      parameters:
+        - in: path
+          name: city
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Weather for one city
+          content:
+            application/json:
+              example:
+                city: selected
+                temperature: 20

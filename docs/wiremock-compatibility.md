@@ -1,4 +1,4 @@
-# WireMock compatibility in M1
+# WireMock compatibility in M1 and M2
 
 WireMock JSON is an interoperability input format. Mockingo implements the
 subset below natively in Go; it does not run Java, a WireMock process, Docker,
@@ -57,3 +57,18 @@ startup. Absolute source paths are never returned to remote callers.
 Status must be from 100 through 599. Priority defaults to WireMock's normal
 value of 5; smaller values match first. Fixed delay must be non-negative and no
 more than 30 seconds.
+
+## Hybrid Expose
+
+The supported mapping subset is identical in standalone and hybrid modes:
+
+```bash
+mockingo mock --name weather --wiremock ./wiremock
+mockingo expose --name shop --http 8080 --wiremock ./wiremock
+```
+
+In hybrid mode, a matching mapping is rendered directly by the agent and never
+contacts the local application. A non-matching method, exact URL, path, or path
+template is forwarded through the normal local forwarder. In particular,
+`request.url` retains exact query-string matching while `request.urlPath`
+ignores the query exactly as it does in standalone mode.

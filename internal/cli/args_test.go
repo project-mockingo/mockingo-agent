@@ -32,6 +32,28 @@ func TestExposeHelpIsOAuthOnly(t *testing.T) {
 	if strings.Contains(output.String(), "--legacy") || strings.Contains(output.String(), "--token") {
 		t.Fatalf("removed option appears in help: %s", output.String())
 	}
+	if !strings.Contains(output.String(), "--wiremock") || !strings.Contains(output.String(), "--openapi") {
+		t.Fatalf("hybrid source options missing from help: %s", output.String())
+	}
+}
+
+func TestParseExposeMockSourcesAreOptionalAndMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+	pure, err := ParseExpose([]string{"--name", "demo", "--http", "8080"})
+	if err != nil || pure.WireMock != "" || pure.OpenAPI != "" {
+		t.Fatalf("pure expose options = %#v, %v", pure, err)
+	}
+	wireMock, err := ParseExpose([]string{"--name", "demo", "--http", "8080", "--wiremock", "wiremock"})
+	if err != nil || wireMock.WireMock != "wiremock" {
+		t.Fatalf("WireMock options = %#v, %v", wireMock, err)
+	}
+	openAPI, err := ParseExpose([]string{"--name", "demo", "--http", "8080", "--openapi", "partial.yaml"})
+	if err != nil || openAPI.OpenAPI != "partial.yaml" {
+		t.Fatalf("OpenAPI options = %#v, %v", openAPI, err)
+	}
+	if _, err := ParseExpose([]string{"--name", "demo", "--http", "8080", "--wiremock", "wiremock", "--openapi", "partial.yaml"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("two hybrid sources error = %v", err)
+	}
 }
 
 func TestParseExposePreservesCommandArguments(t *testing.T) {
