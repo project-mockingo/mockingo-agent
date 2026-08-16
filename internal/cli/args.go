@@ -22,6 +22,8 @@ func (f *envFlags) Set(value string) error {
 type ExposeOptions struct {
 	Name                  string
 	HTTPPort              int
+	WireMock              string
+	OpenAPI               string
 	CWD                   string
 	Environment           map[string]string
 	StartupTimeout        time.Duration
@@ -187,6 +189,8 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	set.SetOutput(new(strings.Builder))
 	set.StringVar(&options.Name, "name", "", "tunnel name")
 	set.IntVar(&options.HTTPPort, "http", 0, "local HTTP port")
+	set.StringVar(&options.WireMock, "wiremock", "", "WireMock project directory or mapping JSON file")
+	set.StringVar(&options.OpenAPI, "openapi", "", "OpenAPI YAML or JSON document")
 	set.StringVar(&options.CWD, "cwd", "", "child working directory")
 	set.Var(&env, "env", "child environment KEY=VALUE")
 	set.DurationVar(&options.StartupTimeout, "startup-timeout", 60*time.Second, "startup timeout")
@@ -208,6 +212,9 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	}
 	if options.HTTPPort < 1 || options.HTTPPort > 65535 {
 		return ExposeOptions{}, errors.New("--http must be a port between 1 and 65535")
+	}
+	if options.WireMock != "" && options.OpenAPI != "" {
+		return ExposeOptions{}, errors.New("--wiremock and --openapi are mutually exclusive")
 	}
 	if options.StartupTimeout <= 0 || options.RequestTimeout <= 0 {
 		return ExposeOptions{}, errors.New("timeouts must be greater than zero")

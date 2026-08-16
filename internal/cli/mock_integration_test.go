@@ -133,3 +133,26 @@ func TestInvalidMockSourceDoesNotReachAuthenticationOrTunnel(t *testing.T) {
 		t.Fatalf("code = %d output = %s", code, output.String())
 	}
 }
+
+func TestInvalidHybridExposeSourceDoesNotReachAuthenticationOrTunnel(t *testing.T) {
+	tests := []struct {
+		name, flag, filename, content, expected string
+	}{
+		{name: "WireMock", flag: "--wiremock", filename: "bad.json", content: `{"request":{"method":"POST","urlPath":"/","bodyPatterns":[]},"response":{"status":200}}`, expected: "request.bodyPatterns"},
+		{name: "OpenAPI", flag: "--openapi", filename: "bad.yaml", content: "openapi: 3.0.3\ninfo: [not-an-object]\n", expected: "OpenAPI"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), test.filename)
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			app := &App{Stdout: &output, Stderr: &output, ConfigPath: filepath.Join(t.TempDir(), "missing-config.json")}
+			code := app.Run(context.Background(), []string{"expose", "--name", "shop", "--http", "8080", test.flag, path})
+			if code == 0 || !strings.Contains(output.String(), test.expected) || strings.Contains(output.String(), "not signed in") {
+				t.Fatalf("code = %d output = %s", code, output.String())
+			}
+		})
+	}
+}

@@ -44,8 +44,51 @@ Content-Type: application/json
 {"code":"mock_not_found","message":"No mock matched this request."}
 ```
 
-Standalone mock mode never forwards unmatched requests. Hybrid mock-first,
-localhost-fallback behavior is deferred to M2.
+Standalone mock mode never forwards unmatched requests.
+
+## Hybrid Expose
+
+Hybrid expose loads and compiles the same M1 `MockDefinition` values before it
+starts an optional child application, validates the local port, or requests a
+tunnel session:
+
+```bash
+mockingo expose --name shop --http 8080 --wiremock ./wiremock
+mockingo expose --name shop --http 8080 --openapi ./partial-api.yaml
+```
+
+```text
+Public Request
+      |
+Mockingo Tunnel
+      |
+Agent
+      |
+Mock matcher
+   +-------+---------+
+ MATCH           NO MATCH
+   |                 |
+Mock response    localhost:8080
+```
+
+The routing rule is fixed: a match is authoritative, including a declared 4xx
+or 5xx response, and never reaches localhost; a miss uses the normal expose
+forwarder exactly once. An internal failure while rendering a matched mock
+returns a safe 500 and does not fall back to the real service. `--wiremock` and
+`--openapi` are mutually exclusive and no `--hybrid` or `--unmatched` flag is
+needed.
+
+The dispatcher renders matched definitions directly. It does not route hybrid
+mocks through the standalone loopback server. The compiled read-only engine,
+local application, and dispatcher survive gateway reconnects; only the tunnel
+session and one-use ticket are renewed. With `--verbose`, local traffic output
+labels responses as `MOCK` or `FORWARD` without logging bodies or credentials.
+
+| Command | Match | No match |
+|---|---|---|
+| `mockingo expose --http 8080` | forward | forward |
+| `mockingo expose --http 8080 --wiremock/--openapi` | mock | forward |
+| `mockingo mock --wiremock/--openapi` | mock | `404 mock_not_found` |
 
 ## Runtime and limits
 
@@ -60,5 +103,5 @@ localhost-fallback behavior is deferred to M2.
   application shutdown.
 - OpenAPI example generation stops at depth 12 and safely truncates cycles.
 
-Mappings and specifications are loaded once. M1 has no hot reload, recording,
+Mappings and specifications are loaded once. M1/M2 have no hot reload, recording,
 request journal, verification API, custom Mockingo DSL, or admin endpoint.

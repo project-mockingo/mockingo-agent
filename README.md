@@ -17,6 +17,8 @@ public request --> https://<endpoint-name>.mockingo.click --> localhost
 mockingo login
 mockingo whoami
 mockingo expose --name spring-demo --http 8080
+mockingo expose --name shop --http 8080 --wiremock ./examples/hybrid-wiremock/wiremock
+mockingo expose --name shop --http 8080 --openapi ./examples/hybrid-openapi/partial-api.yaml
 mockingo mock --name weather --wiremock ./examples/wiremock-weather
 mockingo mock --name weather --openapi ./examples/openapi-weather/openapi.yaml
 mockingo logout
@@ -40,6 +42,37 @@ Unmatched requests return a JSON `404 mock_not_found`; they are not forwarded
 to another local service. See [docs/mocking.md](docs/mocking.md),
 [docs/wiremock-compatibility.md](docs/wiremock-compatibility.md), and
 [docs/openapi-mocking.md](docs/openapi-mocking.md).
+
+## Hybrid Expose
+
+`mockingo expose` optionally composes the same local mock engine with the real
+application already listening on `--http`:
+
+```bash
+mockingo expose --name shop --http 8080 --wiremock ./wiremock
+mockingo expose --name shop --http 8080 --openapi ./partial-api.yaml
+```
+
+Matching WireMock routes or compiled OpenAPI operations return a mock response
+directly from the agent. Every unmatched request is forwarded exactly once to
+`127.0.0.1:8080`, with its method, path, query, headers, and body preserved.
+`--wiremock` and `--openapi` are mutually exclusive; neither is required, so
+plain `mockingo expose --name shop --http 8080` remains pure forwarding.
+
+```text
+Public Request
+      |
+Mockingo Tunnel
+      |
+Agent mock matcher
+   +-- MATCH ------> mock response
+   +-- NO MATCH ---> localhost:8080
+```
+
+This differs deliberately from standalone `mockingo mock`, where an unmatched
+request returns `404 mock_not_found` and no local application is involved.
+Mock files, match details, and the selected `MOCK`/`FORWARD` route stay local;
+the control plane, gateway, and protocol v1 carry ordinary HTTP data only.
 
 Login uses OAuth Authorization Code Flow with PKCE. Access and refresh tokens
 are stored under service `mockingo`, account `oauth:<issuer>:<client-id>`, in

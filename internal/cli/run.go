@@ -33,6 +33,7 @@ type App struct {
 
 type exposeTarget struct {
 	embeddedMock bool
+	mocks        loadedMockSource
 }
 
 func New() *App { return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} }
@@ -105,7 +106,23 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
-	return a.exposeOptions(ctx, options, exposeTarget{})
+	target := exposeTarget{}
+	if options.WireMock != "" || options.OpenAPI != "" {
+		target.mocks, err = loadMockSource(ctx, options.WireMock, options.OpenAPI, func(message string) {
+			fmt.Fprintf(a.Stderr, "Warning: %s\n", message)
+		})
+		if err != nil {
+			return 1, err
+		}
+		fmt.Fprintln(a.Stdout, "Mockingo Expose")
+		fmt.Fprintf(a.Stdout, "\nEndpoint:   %s\nTarget:     http://127.0.0.1:%d\nMocks:      %s\n%s:%s%d\n\n", options.Name, options.HTTPPort, target.mocks.Source, target.mocks.CountLabel, strings.Repeat(" ", max(1, 11-len(target.mocks.CountLabel))), target.mocks.Count)
+		if target.mocks.Source == "WireMock" {
+			fmt.Fprintln(a.Stdout, "✓ Mock mappings loaded")
+		} else {
+			fmt.Fprintln(a.Stdout, "✓ OpenAPI mock routes generated")
+		}
+	}
+	return a.exposeOptions(ctx, options, target)
 }
 
 func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target exposeTarget) (int, error) {
@@ -226,6 +243,19 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 	if options.Verbose {
 		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
 	}
+	var requestHandler agent.RequestHandler
+	if target.mocks.Engine != nil {
+		forwarder := agent.NewLocalForwarder(options.RequestTimeout)
+		requestHandler = agent.NewHybridHandler(target.mocks.Engine, forwarder, func(renderErr error) {
+			fmt.Fprintf(a.Stderr, "Mock response rendering failed: %v\n", renderErr)
+		})
+	}
+	var traffic func(string, string, int, agent.Route)
+	if target.mocks.Engine != nil && options.Verbose {
+		traffic = func(method, path string, status int, route agent.Route) {
+			fmt.Fprintf(a.Stdout, "→ %s %s\n← %d %s\n", method, path, status, route)
+		}
+	}
 	request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: "http", LocalPort: options.HTTPPort, ProtocolVersion: options.ProtocolVersion}
 	validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
 	createSession := func(sessionCtx context.Context) (agent.Session, error) {
@@ -248,7 +278,8 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 	tunnelAgent := agent.New(agent.Config{
 		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable, TemporaryConflict: apiclient.IsTemporarySessionConflict,
 		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
-		OnState: state, Verbose: verbose, PublicURL: initial.PublicURL,
+		OnState: state, OnRequest: traffic, Verbose: verbose, PublicURL: initial.PublicURL,
+		Handler:          requestHandler,
 		ReconnectEnabled: options.ReconnectEnabled, ReconnectInitialDelay: options.ReconnectInitialDelay,
 		ReconnectMaxDelay: options.ReconnectMaxDelay,
 	})
@@ -318,10 +349,10 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 }
 
 func (a *App) exposeUsage() {
-	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [--wiremock PATH | --openapi FILE] [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "")
 	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")
-	fmt.Fprintln(a.Stdout, "Options: --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
+	fmt.Fprintln(a.Stdout, "Options: --wiremock, --openapi, --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
 }
 
 func mapTunnelSessionError(name string, err error) error {

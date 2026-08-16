@@ -6,10 +6,7 @@ import (
 	"strings"
 	"time"
 
-	mockengine "github.com/project-mockingo/mockingo-agent/internal/mock"
-	openapiadapter "github.com/project-mockingo/mockingo-agent/internal/mock/openapi"
 	mockserver "github.com/project-mockingo/mockingo-agent/internal/mock/server"
-	"github.com/project-mockingo/mockingo-agent/internal/mock/wiremock"
 	"github.com/project-mockingo/mockingo-agent/internal/naming"
 )
 
@@ -28,26 +25,15 @@ func (a *App) mock(ctx context.Context, args []string) (int, error) {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	var definitions []mockengine.MockDefinition
-	var source, countLabel string
-	if options.WireMock != "" {
-		source = "WireMock"
-		countLabel = "Mappings"
-		definitions, err = wiremock.Load(options.WireMock)
-	} else {
-		source = "OpenAPI"
-		countLabel = "Operations"
-		definitions, err = openapiadapter.Load(ctx, options.OpenAPI, func(message string) {
-			fmt.Fprintf(a.Stderr, "Warning: %s\n", message)
-		})
-	}
+	loaded, err := loadMockSource(ctx, options.WireMock, options.OpenAPI, func(message string) {
+		fmt.Fprintf(a.Stderr, "Warning: %s\n", message)
+	})
 	if err != nil {
 		return 1, err
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	engine := mockengine.Compile(definitions)
 	var traffic func(string, string, int, bool)
 	if options.Verbose {
 		traffic = func(method, path string, status int, matched bool) {
@@ -58,7 +44,7 @@ func (a *App) mock(ctx context.Context, args []string) (int, error) {
 			fmt.Fprintf(a.Stdout, "→ %s %s\n← %d %s\n", method, path, status, label)
 		}
 	}
-	server, err := mockserver.Start(runCtx, engine, traffic)
+	server, err := mockserver.Start(runCtx, loaded.Engine, traffic)
 	if err != nil {
 		return 1, fmt.Errorf("start embedded mock server: %w", err)
 	}
@@ -70,9 +56,9 @@ func (a *App) mock(ctx context.Context, args []string) (int, error) {
 	}()
 
 	fmt.Fprintln(a.Stdout, "Mockingo Mock")
-	fmt.Fprintf(a.Stdout, "\nSource:     %s\n%s:%s%d\nEndpoint:   %s\n\n", source, countLabel, strings.Repeat(" ", max(1, 11-len(countLabel))), len(definitions), options.Name)
-	if source == "OpenAPI" {
-		fmt.Fprintf(a.Stdout, "✓ OpenAPI loaded\n✓ %d mock routes generated\n", len(definitions))
+	fmt.Fprintf(a.Stdout, "\nSource:     %s\n%s:%s%d\nEndpoint:   %s\n\n", loaded.Source, loaded.CountLabel, strings.Repeat(" ", max(1, 11-len(loaded.CountLabel))), loaded.Count, options.Name)
+	if loaded.Source == "OpenAPI" {
+		fmt.Fprintf(a.Stdout, "✓ OpenAPI loaded\n✓ %d mock routes generated\n", loaded.Count)
 	} else {
 		fmt.Fprintln(a.Stdout, "✓ Mock engine ready")
 	}

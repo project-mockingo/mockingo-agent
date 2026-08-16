@@ -1,0 +1,17 @@
+{
+  "name": "Payment service unavailable",
+  "priority": 1,
+  "request": {
+    "method": "POST",
+    "urlPath": "/payment"
+  },
+  "response": {
+    "status": 503,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "code": "payment_unavailable"
+    }
+  }
+}

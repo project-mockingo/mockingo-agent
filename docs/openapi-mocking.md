@@ -1,4 +1,4 @@
-# OpenAPI mocking in M1
+# OpenAPI mocking in M1 and M2
 
 OpenAPI is an importer, not part of the request hot path:
 
@@ -61,3 +61,21 @@ HTTP(S) references fail startup. No network fetch is attempted.
 M1 does not enforce OpenAPI security, request schemas, parameters, headers, or
 authentication. It does not execute callbacks, webhooks, links, external
 examples, or server URLs.
+
+## Hybrid Expose
+
+An OpenAPI document can replace part of a real local application:
+
+```bash
+mockingo expose --name shop --http 8080 --openapi ./partial-api.yaml
+```
+
+Every operation compiled from the document becomes a mock route. Requests for
+operations absent from the compiled document are forwarded to the local
+service, including their original query, headers, and body. OpenAPI path
+templates retain the same segment matching used by standalone mode.
+
+OpenAPI documents often describe a complete API, so passing a complete
+document mocks every supported operation in it. M2 has no per-operation
+include/exclude option; use a partial document when only selected operations
+should be replaced.
