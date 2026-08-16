@@ -54,3 +54,17 @@ func TestRemovedExposeOptionsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMockRequiresExactlyOneSource(t *testing.T) {
+	t.Parallel()
+	if _, err := ParseMock([]string{"--name", "weather"}); err == nil {
+		t.Fatal("missing source accepted")
+	}
+	if _, err := ParseMock([]string{"--name", "weather", "--wiremock", "wiremock", "--openapi", "openapi.yaml"}); err == nil {
+		t.Fatal("two sources accepted")
+	}
+	options, err := ParseMock([]string{"--name", "weather", "--wiremock", "wiremock"})
+	if err != nil || options.WireMock != "wiremock" || options.Name != "weather" {
+		t.Fatalf("options = %#v, %v", options, err)
+	}
+}

@@ -31,6 +31,10 @@ type App struct {
 	OpenBrowser func(string) error
 }
 
+type exposeTarget struct {
+	embeddedMock bool
+}
+
 func New() *App { return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} }
 
 func (a *App) Run(ctx context.Context, args []string) int {
@@ -49,6 +53,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.logout(ctx, args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
+	case "mock":
+		code, err = a.mock(ctx, args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -74,6 +80,7 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "  mockingo mock --name NAME (--wiremock PATH | --openapi FILE) [options]")
 	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
 
@@ -98,6 +105,10 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
+	return a.exposeOptions(ctx, options, exposeTarget{})
+}
+
+func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target exposeTarget) (int, error) {
 	if err := naming.Validate(options.Name); err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -170,34 +181,36 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 	defer cleanupChild()
 
-	fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", options.HTTPPort)
-	startupCtx, startupCancel := context.WithTimeout(runCtx, options.StartupTimeout)
-	ready := make(chan error, 1)
-	go func() { ready <- readiness.Wait(startupCtx, options.HTTPPort) }()
-	if child == nil {
-		err = <-ready
-	} else {
-		select {
-		case err = <-ready:
-		case result := <-child.Done():
-			startupCancel()
-			return exitCode(result), fmt.Errorf("process startup failure: process exited before port became ready")
-		case <-runCtx.Done():
-			startupCancel()
-			return 0, nil
+	if !target.embeddedMock {
+		fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", options.HTTPPort)
+		startupCtx, startupCancel := context.WithTimeout(runCtx, options.StartupTimeout)
+		ready := make(chan error, 1)
+		go func() { ready <- readiness.Wait(startupCtx, options.HTTPPort) }()
+		if child == nil {
+			err = <-ready
+		} else {
+			select {
+			case err = <-ready:
+			case result := <-child.Done():
+				startupCancel()
+				return exitCode(result), fmt.Errorf("process startup failure: process exited before port became ready")
+			case <-runCtx.Done():
+				startupCancel()
+				return 0, nil
+			}
 		}
+		startupCancel()
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return 1, fmt.Errorf("startup timeout: port %d did not become ready within %s", options.HTTPPort, options.StartupTimeout)
+			}
+			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+				return 0, nil
+			}
+			return 1, fmt.Errorf("process startup failure: wait for local port: %w", err)
+		}
+		fmt.Fprintln(a.Stdout, "Application is ready.")
 	}
-	startupCancel()
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 1, fmt.Errorf("startup timeout: port %d did not become ready within %s", options.HTTPPort, options.StartupTimeout)
-		}
-		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-			return 0, nil
-		}
-		return 1, fmt.Errorf("process startup failure: wait for local port: %w", err)
-	}
-	fmt.Fprintln(a.Stdout, "Application is ready.")
 
 	initialConnected := make(chan struct{}, 1)
 	state := func(message string) {
@@ -271,7 +284,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 			return 0, nil
 		}
 	}
-	fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, options.HTTPPort)
+	if target.embeddedMock {
+		fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nPress Ctrl+C to stop.\n", publicURL)
+	} else {
+		fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, options.HTTPPort)
+	}
 	if child == nil {
 		select {
 		case err := <-agentDone:
