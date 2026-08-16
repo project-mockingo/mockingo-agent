@@ -25,7 +25,6 @@ type Config struct {
 	LocalPort             int
 	RequestTimeout        time.Duration
 	OnState               func(string)
-	OnRequest             func(method, path string, status int, route Route)
 	Verbose               func(string, ...any)
 	PublicURL             string
 	InitialSession        *Session
@@ -35,7 +34,6 @@ type Config struct {
 	ReconnectEnabled      bool
 	ReconnectInitialDelay time.Duration
 	ReconnectMaxDelay     time.Duration
-	Handler               RequestHandler
 }
 
 // Session contains an ephemeral backend-issued credential. Ticket is consumed
@@ -54,16 +52,18 @@ func (s Session) String() string {
 }
 
 type Agent struct {
-	config  Config
-	handler RequestHandler
+	config Config
+	client *http.Client
 }
 
 func New(config Config) *Agent {
-	handler := config.Handler
-	if handler == nil {
-		handler = NewLocalForwarder(config.RequestTimeout)
+	client := &http.Client{
+		Timeout: config.RequestTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
-	return &Agent{config: config, handler: handler}
+	return &Agent{config: config, client: client}
 }
 
 // Run owns the connection state machine until its parent context is cancelled.
@@ -374,26 +374,32 @@ func (a *Agent) handleRequest(parent context.Context, writer *socketWriter, mess
 	}
 	request.Header = tunnelhttp.FilterHeaders(http.Header(message.Headers))
 	request.Host = "" // derive the local Host from the fixed URL above
-	response, err := a.handler.Handle(request)
+	response, err := a.client.Do(request)
 	if err != nil {
-		var handlerErr *HandlerError
-		if errors.As(err, &handlerErr) {
-			respondError(handlerErr.Code)
-			return
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			respondError(tunnelprotocol.ErrorCodeTimeout)
+		} else {
+			respondError(tunnelprotocol.ErrorCodeLocalUnreachable)
 		}
-		respondError(tunnelprotocol.ErrorCodeLocalResponseError)
+		return
+	}
+	defer response.Body.Close()
+	responseBody, err := tunnelprotocol.ReadBody(response.Body)
+	if err != nil {
+		if errors.Is(err, tunnelprotocol.ErrBodyTooLarge) {
+			respondError(tunnelprotocol.ErrorCodeResponseTooLarge)
+		} else {
+			respondError(tunnelprotocol.ErrorCodeLocalResponseError)
+		}
 		return
 	}
 	result := tunnelprotocol.Message{
 		Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeResponse,
-		RequestID: message.RequestID, Status: response.Status,
-		Headers:    tunnelhttp.FilterHeaders(response.Headers),
-		BodyBase64: base64.StdEncoding.EncodeToString(response.Body),
+		RequestID: message.RequestID, Status: response.StatusCode,
+		Headers:    tunnelhttp.FilterHeaders(response.Header),
+		BodyBase64: base64.StdEncoding.EncodeToString(responseBody),
 	}
 	_ = writer.write(result)
-	if a.config.OnRequest != nil {
-		a.config.OnRequest(message.Method, path.Path, response.Status, response.Route)
-	}
 }
 
 func (a *Agent) String() string {

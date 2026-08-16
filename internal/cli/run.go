@@ -31,11 +31,6 @@ type App struct {
 	OpenBrowser func(string) error
 }
 
-type exposeTarget struct {
-	embeddedMock bool
-	mocks        loadedMockSource
-}
-
 func New() *App { return &App{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr} }
 
 func (a *App) Run(ctx context.Context, args []string) int {
@@ -54,8 +49,6 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.logout(ctx, args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
-	case "mock":
-		code, err = a.mock(ctx, args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -81,7 +74,6 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
-	fmt.Fprintln(a.Stdout, "  mockingo mock --name NAME (--wiremock PATH | --openapi FILE) [options]")
 	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
 
@@ -106,26 +98,6 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
-	target := exposeTarget{}
-	if options.WireMock != "" || options.OpenAPI != "" {
-		target.mocks, err = loadMockSource(ctx, options.WireMock, options.OpenAPI, func(message string) {
-			fmt.Fprintf(a.Stderr, "Warning: %s\n", message)
-		})
-		if err != nil {
-			return 1, err
-		}
-		fmt.Fprintln(a.Stdout, "Mockingo Expose")
-		fmt.Fprintf(a.Stdout, "\nEndpoint:   %s\nTarget:     http://127.0.0.1:%d\nMocks:      %s\n%s:%s%d\n\n", options.Name, options.HTTPPort, target.mocks.Source, target.mocks.CountLabel, strings.Repeat(" ", max(1, 11-len(target.mocks.CountLabel))), target.mocks.Count)
-		if target.mocks.Source == "WireMock" {
-			fmt.Fprintln(a.Stdout, "✓ Mock mappings loaded")
-		} else {
-			fmt.Fprintln(a.Stdout, "✓ OpenAPI mock routes generated")
-		}
-	}
-	return a.exposeOptions(ctx, options, target)
-}
-
-func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target exposeTarget) (int, error) {
 	if err := naming.Validate(options.Name); err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -198,36 +170,34 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 	}
 	defer cleanupChild()
 
-	if !target.embeddedMock {
-		fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", options.HTTPPort)
-		startupCtx, startupCancel := context.WithTimeout(runCtx, options.StartupTimeout)
-		ready := make(chan error, 1)
-		go func() { ready <- readiness.Wait(startupCtx, options.HTTPPort) }()
-		if child == nil {
-			err = <-ready
-		} else {
-			select {
-			case err = <-ready:
-			case result := <-child.Done():
-				startupCancel()
-				return exitCode(result), fmt.Errorf("process startup failure: process exited before port became ready")
-			case <-runCtx.Done():
-				startupCancel()
-				return 0, nil
-			}
+	fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", options.HTTPPort)
+	startupCtx, startupCancel := context.WithTimeout(runCtx, options.StartupTimeout)
+	ready := make(chan error, 1)
+	go func() { ready <- readiness.Wait(startupCtx, options.HTTPPort) }()
+	if child == nil {
+		err = <-ready
+	} else {
+		select {
+		case err = <-ready:
+		case result := <-child.Done():
+			startupCancel()
+			return exitCode(result), fmt.Errorf("process startup failure: process exited before port became ready")
+		case <-runCtx.Done():
+			startupCancel()
+			return 0, nil
 		}
-		startupCancel()
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				return 1, fmt.Errorf("startup timeout: port %d did not become ready within %s", options.HTTPPort, options.StartupTimeout)
-			}
-			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-				return 0, nil
-			}
-			return 1, fmt.Errorf("process startup failure: wait for local port: %w", err)
-		}
-		fmt.Fprintln(a.Stdout, "Application is ready.")
 	}
+	startupCancel()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 1, fmt.Errorf("startup timeout: port %d did not become ready within %s", options.HTTPPort, options.StartupTimeout)
+		}
+		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+			return 0, nil
+		}
+		return 1, fmt.Errorf("process startup failure: wait for local port: %w", err)
+	}
+	fmt.Fprintln(a.Stdout, "Application is ready.")
 
 	initialConnected := make(chan struct{}, 1)
 	state := func(message string) {
@@ -242,19 +212,6 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 	var verbose func(string, ...any)
 	if options.Verbose {
 		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
-	}
-	var requestHandler agent.RequestHandler
-	if target.mocks.Engine != nil {
-		forwarder := agent.NewLocalForwarder(options.RequestTimeout)
-		requestHandler = agent.NewHybridHandler(target.mocks.Engine, forwarder, func(renderErr error) {
-			fmt.Fprintf(a.Stderr, "Mock response rendering failed: %v\n", renderErr)
-		})
-	}
-	var traffic func(string, string, int, agent.Route)
-	if target.mocks.Engine != nil && options.Verbose {
-		traffic = func(method, path string, status int, route agent.Route) {
-			fmt.Fprintf(a.Stdout, "→ %s %s\n← %d %s\n", method, path, status, route)
-		}
 	}
 	request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: "http", LocalPort: options.HTTPPort, ProtocolVersion: options.ProtocolVersion}
 	validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
@@ -278,8 +235,7 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 	tunnelAgent := agent.New(agent.Config{
 		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable, TemporaryConflict: apiclient.IsTemporarySessionConflict,
 		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
-		OnState: state, OnRequest: traffic, Verbose: verbose, PublicURL: initial.PublicURL,
-		Handler:          requestHandler,
+		OnState: state, Verbose: verbose, PublicURL: initial.PublicURL,
 		ReconnectEnabled: options.ReconnectEnabled, ReconnectInitialDelay: options.ReconnectInitialDelay,
 		ReconnectMaxDelay: options.ReconnectMaxDelay,
 	})
@@ -315,11 +271,7 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 			return 0, nil
 		}
 	}
-	if target.embeddedMock {
-		fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nPress Ctrl+C to stop.\n", publicURL)
-	} else {
-		fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, options.HTTPPort)
-	}
+	fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, options.HTTPPort)
 	if child == nil {
 		select {
 		case err := <-agentDone:
@@ -349,10 +301,10 @@ func (a *App) exposeOptions(ctx context.Context, options ExposeOptions, target e
 }
 
 func (a *App) exposeUsage() {
-	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [--wiremock PATH | --openapi FILE] [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "")
 	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")
-	fmt.Fprintln(a.Stdout, "Options: --wiremock, --openapi, --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
+	fmt.Fprintln(a.Stdout, "Options: --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
 }
 
 func mapTunnelSessionError(name string, err error) error {
