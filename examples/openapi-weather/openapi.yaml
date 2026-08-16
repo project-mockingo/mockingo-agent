@@ -1,0 +1,16 @@
+openapi: 3.0.3
+info:
+  title: Weather API
+  version: 1.0.0
+paths:
+  /weather:
+    get:
+      operationId: getWeather
+      responses:
+        '200':
+          description: Current weather
+          content:
+            application/json:
+              example:
+                city: Prague
+                temperature: 23

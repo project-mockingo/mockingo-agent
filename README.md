@@ -17,8 +17,29 @@ public request --> https://<endpoint-name>.mockingo.click --> localhost
 mockingo login
 mockingo whoami
 mockingo expose --name spring-demo --http 8080
+mockingo mock --name weather --wiremock ./examples/wiremock-weather
+mockingo mock --name weather --openapi ./examples/openapi-weather/openapi.yaml
 mockingo logout
 ```
+
+## Local mocking
+
+`mockingo mock` compiles WireMock JSON mappings or an OpenAPI 3.x document into
+an immutable local mock engine, serves it on an ephemeral `127.0.0.1` port, and
+publishes it through the existing authenticated HTTP tunnel. Mock sources stay
+on the local machine; neither the control plane nor gateway receives them.
+
+Exactly one source is required:
+
+```bash
+mockingo mock --name weather --wiremock ./wiremock
+mockingo mock --name weather --openapi ./openapi.yaml
+```
+
+Unmatched requests return a JSON `404 mock_not_found`; they are not forwarded
+to another local service. See [docs/mocking.md](docs/mocking.md),
+[docs/wiremock-compatibility.md](docs/wiremock-compatibility.md), and
+[docs/openapi-mocking.md](docs/openapi-mocking.md).
 
 Login uses OAuth Authorization Code Flow with PKCE. Access and refresh tokens
 are stored under service `mockingo`, account `oauth:<issuer>:<client-id>`, in
