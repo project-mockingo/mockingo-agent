@@ -160,3 +160,51 @@ func TestTemporarySessionConflictIsRetried(t *testing.T) {
 		t.Fatal("missing conflict state")
 	}
 }
+
+func TestEndpointVirtualizedDisconnectStopsReconnect(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = ws.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, DisconnectEndpointVirtualized),
+			time.Now().Add(time.Second),
+		)
+		_ = ws.Close()
+	}))
+	defer server.Close()
+	connectURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	var reacquired atomic.Int32
+	states := make(chan string, 3)
+	initial := Session{EndpointName: "crm", SessionID: "initial", ConnectURL: connectURL, Ticket: "ticket"}
+	agent := New(Config{
+		InitialSession: &initial,
+		AcquireSession: func(context.Context) (Session, error) {
+			reacquired.Add(1)
+			return Session{}, errors.New("must not reconnect")
+		},
+		ReconnectEnabled:      true,
+		ReconnectInitialDelay: time.Millisecond,
+		ReconnectMaxDelay:     2 * time.Millisecond,
+		LocalPort:             8080,
+		RequestTimeout:        time.Second,
+		OnState:               func(state string) { states <- state },
+	})
+	if err := agent.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if reacquired.Load() != 0 {
+		t.Fatalf("session reacquired %d times", reacquired.Load())
+	}
+	var messages []string
+	for len(states) > 0 {
+		messages = append(messages, <-states)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, `Endpoint "crm" was switched to Virtual mode.`) || !strings.Contains(joined, "The local tunnel has been disconnected.") {
+		t.Fatalf("states = %q", joined)
+	}
+}

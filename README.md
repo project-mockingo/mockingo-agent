@@ -41,6 +41,10 @@ session and ticket; tickets are never persisted or logged.
 Static gateway tokens, direct gateway endpoint CRUD, direct registration, and
 legacy token login/expose modes are not supported.
 
+## Virtual endpoints
+
+Endpoint origin mode is persistent cloud configuration; the CLI has no `--virtual` mode and never executes mocks. The control plane rejects `mockingo expose` for a Virtual endpoint and directs the user to switch it to Local. When a connected Local endpoint is switched to Virtual, the Gateway closes the tunnel with `endpoint_virtualized`; that reason ends the expose session without entering the normal reconnect loop. Other transient disconnects keep the existing reconnect behavior.
+
 ## Tunnel protocol
 
 The public `tunnelprotocol` package in this module is the canonical Go

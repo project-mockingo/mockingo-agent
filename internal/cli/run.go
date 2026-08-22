@@ -315,6 +315,8 @@ func mapTunnelSessionError(name string, err error) error {
 			return fmt.Errorf("The endpoint name %q is unavailable.\nChoose another name.", name)
 		case "invalid_endpoint_name":
 			return fmt.Errorf("invalid endpoint name %q", name)
+		case "endpoint_virtual":
+			return fmt.Errorf("Endpoint %q is configured as Virtual.\nSwitch it to Local origin before connecting an Agent.", name)
 		}
 	}
 	return err

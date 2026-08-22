@@ -80,6 +80,8 @@ type GatewayError struct {
 	Code   string
 }
 
+const DisconnectEndpointVirtualized = "endpoint_virtualized"
+
 func (e *GatewayError) Error() string {
 	if e.Code != "" {
 		return fmt.Sprintf("gateway rejected tunnel connection (HTTP %d, code %s)", e.Status, e.Code)
@@ -190,6 +192,12 @@ func (a *Agent) runTicket(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if endpointVirtualizedDisconnect(err) {
+			if a.config.OnState != nil {
+				a.config.OnState(fmt.Sprintf("Endpoint %q was switched to Virtual mode.\nThe local tunnel has been disconnected.", session.EndpointName))
+			}
+			return nil
+		}
 		if !reconnectEnabled {
 			return fmt.Errorf("tunnel disconnected: %w", err)
 		}
@@ -204,6 +212,11 @@ func (a *Agent) runTicket(ctx context.Context) error {
 		}
 		delay = nextDelayMax(delay, maxDelay)
 	}
+}
+
+func endpointVirtualizedDisconnect(err error) bool {
+	var closeErr *websocket.CloseError
+	return errors.As(err, &closeErr) && closeErr.Text == DisconnectEndpointVirtualized
 }
 
 // dialWebSocket closes the underlying socket when the owning context is
