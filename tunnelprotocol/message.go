@@ -9,22 +9,41 @@ const (
 	TypePong                  = "pong"
 	TypeError                 = "error"
 	TypeDependencyInteraction = "dependency_interaction_completed"
+	TypeDependencyConfig      = "dependency_behavior_snapshot"
 )
 
 // Message is the complete protocol v1 JSON envelope. Field order and JSON
 // tags are compatibility-sensitive.
 type Message struct {
-	Version    int                    `json:"version"`
-	Type       string                 `json:"type"`
-	RequestID  string                 `json:"requestId,omitempty"`
-	Method     string                 `json:"method,omitempty"`
-	Path       string                 `json:"path,omitempty"`
-	Headers    map[string][]string    `json:"headers,omitempty"`
-	BodyBase64 string                 `json:"bodyBase64,omitempty"`
-	Status     int                    `json:"status,omitempty"`
-	ErrorCode  string                 `json:"errorCode,omitempty"`
-	Error      string                 `json:"error,omitempty"`
-	Dependency *DependencyInteraction `json:"dependency,omitempty"`
+	Version          int                         `json:"version"`
+	Type             string                      `json:"type"`
+	RequestID        string                      `json:"requestId,omitempty"`
+	Method           string                      `json:"method,omitempty"`
+	Path             string                      `json:"path,omitempty"`
+	Headers          map[string][]string         `json:"headers,omitempty"`
+	BodyBase64       string                      `json:"bodyBase64,omitempty"`
+	Status           int                         `json:"status,omitempty"`
+	ErrorCode        string                      `json:"errorCode,omitempty"`
+	Error            string                      `json:"error,omitempty"`
+	Dependency       *DependencyInteraction      `json:"dependency,omitempty"`
+	DependencyConfig *DependencyBehaviorSnapshot `json:"dependencyConfig,omitempty"`
+}
+
+type DependencyBehaviorSnapshot struct {
+	EndpointID string               `json:"endpointId"`
+	Behaviors  []DependencyBehavior `json:"behaviors"`
+}
+
+type DependencyBehavior struct {
+	ID      string              `json:"id"`
+	Scheme  string              `json:"scheme"`
+	Host    string              `json:"host"`
+	Port    int                 `json:"port"`
+	Method  string              `json:"method"`
+	Path    string              `json:"path"`
+	Status  int                 `json:"status"`
+	Headers map[string][]string `json:"headers"`
+	Body    string              `json:"body"`
 }
 
 // CapturedBody is a bounded, textual inspection copy. SizeBytes always refers
@@ -62,6 +81,7 @@ type DependencyInteraction struct {
 	Scheme      string           `json:"scheme"`
 	Host        string           `json:"host"`
 	Port        int              `json:"port"`
+	HandledBy   string           `json:"handledBy"`
 	StartedAt   time.Time        `json:"startedAt"`
 	CompletedAt time.Time        `json:"completedAt"`
 	DurationMS  int64            `json:"durationMs"`

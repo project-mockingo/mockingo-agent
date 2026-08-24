@@ -23,6 +23,7 @@ type ProxyConfig struct {
 	Port             int
 	CA               *CertificateAuthority
 	PassthroughHosts []string
+	Behaviors        *BehaviorStore
 	Emit             func(tunnelprotocol.DependencyInteraction) bool
 	OnCompleted      func(tunnelprotocol.DependencyInteraction)
 	Verbose          func(string, ...any)
@@ -115,6 +116,13 @@ func (p *Proxy) forward(w http.ResponseWriter, request *http.Request, forcedSche
 		http.Error(w, "Invalid dependency target", http.StatusBadRequest)
 		return
 	}
+	if behavior, matched := p.config.Behaviors.Match(scheme, host, port, request.Method, request.URL.Path); matched {
+		p.replay(w, request, scheme, host, port, behavior)
+		return
+	}
+	if p.config.Verbose != nil {
+		p.config.Verbose("dependency_replay_miss scheme=%s host=%s port=%d method=%s path=%s", scheme, host, port, request.Method, request.URL.Path)
+	}
 
 	started := time.Now()
 	startedAt := started.UTC()
@@ -176,6 +184,7 @@ func (p *Proxy) forward(w http.ResponseWriter, request *http.Request, forcedSche
 	}
 	event := tunnelprotocol.DependencyInteraction{
 		ID: uuid.NewString(), Scheme: scheme, Host: host, Port: port,
+		HandledBy: "ORIGIN",
 		StartedAt: startedAt, CompletedAt: startedAt.Add(duration), DurationMS: duration.Milliseconds(),
 		Request:  tunnelprotocol.CapturedRequest{Method: request.Method, Path: request.URL.Path, RawQuery: redactRawQuery(request.URL.RawQuery), Headers: redactHeaders(request.Header), Body: capturedBody(request.Header, requestCapture.preview, requestSize, tunnelprotocol.MaxDependencyRequestPreview), SizeBytes: requestSize},
 		Response: tunnelprotocol.CapturedResponse{Status: response.StatusCode, Headers: redactHeaders(response.Header), Body: capturedBody(response.Header, responseCapture.preview, responseCapture.total, tunnelprotocol.MaxDependencyResponsePreview), SizeBytes: responseCapture.total},
@@ -185,6 +194,74 @@ func (p *Proxy) forward(w http.ResponseWriter, request *http.Request, forcedSche
 	}
 	if p.config.OnCompleted != nil {
 		p.config.OnCompleted(event)
+	}
+}
+
+func (p *Proxy) replay(
+	w http.ResponseWriter,
+	request *http.Request,
+	scheme, host string,
+	port int,
+	behavior tunnelprotocol.DependencyBehavior,
+) {
+	started := time.Now()
+	startedAt := started.UTC()
+	body := request.Body
+	if body == nil {
+		body = http.NoBody
+	}
+	requestCapture := newPreviewReader(body, request.Header, tunnelprotocol.MaxDependencyRequestPreview)
+	_, readErr := io.Copy(io.Discard, requestCapture)
+	if readErr != nil {
+		http.Error(w, "Could not read dependency request", http.StatusBadRequest)
+		return
+	}
+	responseHeaders := http.Header(behavior.Headers).Clone()
+	responseHeaders = filterHopHeaders(responseHeaders)
+	for _, name := range []string{"Authentication-Info", "Authorization", "Content-Encoding", "Content-Length", "Cookie", "Date", "Proxy-Authentication-Info", "Server", "Set-Cookie", "Via"} {
+		responseHeaders.Del(name)
+	}
+	responseBytes := []byte(behavior.Body)
+	responseHeaders.Set("Content-Length", strconv.Itoa(len(responseBytes)))
+	for name, values := range responseHeaders {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(behavior.Status)
+	_, _ = w.Write(responseBytes)
+	duration := time.Since(started)
+	requestSize := requestCapture.total
+	if request.ContentLength >= 0 {
+		requestSize = request.ContentLength
+	}
+	responsePreview := responseBytes
+	if len(responsePreview) > tunnelprotocol.MaxDependencyResponsePreview {
+		responsePreview = responsePreview[:tunnelprotocol.MaxDependencyResponsePreview]
+	}
+	event := tunnelprotocol.DependencyInteraction{
+		ID: uuid.NewString(), Scheme: scheme, Host: host, Port: port, HandledBy: "REPLAY",
+		StartedAt: startedAt, CompletedAt: startedAt.Add(duration), DurationMS: duration.Milliseconds(),
+		Request: tunnelprotocol.CapturedRequest{
+			Method: request.Method, Path: request.URL.Path,
+			RawQuery: redactRawQuery(request.URL.RawQuery), Headers: redactHeaders(request.Header),
+			Body:      capturedBody(request.Header, requestCapture.preview, requestSize, tunnelprotocol.MaxDependencyRequestPreview),
+			SizeBytes: requestSize,
+		},
+		Response: tunnelprotocol.CapturedResponse{
+			Status: behavior.Status, Headers: redactHeaders(responseHeaders),
+			Body:      capturedBody(responseHeaders, responsePreview, int64(len(responseBytes)), tunnelprotocol.MaxDependencyResponsePreview),
+			SizeBytes: int64(len(responseBytes)),
+		},
+	}
+	if p.config.Emit != nil {
+		_ = p.config.Emit(event)
+	}
+	if p.config.OnCompleted != nil {
+		p.config.OnCompleted(event)
+	}
+	if p.config.Verbose != nil {
+		p.config.Verbose("dependency_replay_matched behaviorId=%s scheme=%s host=%s port=%d method=%s path=%s status=%d", behavior.ID, scheme, host, port, request.Method, request.URL.Path, behavior.Status)
 	}
 }
 

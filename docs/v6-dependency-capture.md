@@ -2,8 +2,9 @@
 
 Dependency capture observes HTTP and HTTPS calls made by a local application
 while always forwarding them to the real dependency through the developer
-machine's DNS, VPN, and network stack. It is capture-only: saved dependency
-interactions are never matched or replayed.
+machine's DNS, VPN, and network stack. Saved interactions were not matched in
+the V6 baseline. V7 adds local replay through the same proxy; see
+`v7-dependency-replay.md`.
 
 ## Start and configure
 

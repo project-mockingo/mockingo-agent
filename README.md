@@ -42,14 +42,17 @@ session and ticket; tickets are never persisted or logged.
 Static gateway tokens, direct gateway endpoint CRUD, direct registration, and
 legacy token login/expose modes are not supported.
 
-## Dependency capture
+## Dependency capture and replay
 
 `mockingo capture --name <endpoint>` starts an independent, loopback-only
 explicit HTTP/S proxy on `127.0.0.1:8899`. It prints the proxy URL and the
 public local CA certificate path; it never changes application environment
 variables, operating-system proxy settings, or trust stores. See
 [`docs/v6-dependency-capture.md`](docs/v6-dependency-capture.md) for setup,
-security boundaries, passthrough, and HTTPS limitations.
+security boundaries, passthrough, and HTTPS limitations. Enabled dependency
+replays are delivered over the capture session and matched locally before any
+origin connection; see
+[`docs/v7-dependency-replay.md`](docs/v7-dependency-replay.md).
 
 ## Virtual endpoints
 

@@ -59,6 +59,32 @@ func TestReadBodyLimit(t *testing.T) {
 	}
 }
 
+func TestDependencyBehaviorSnapshotValidation(t *testing.T) {
+	behavior := DependencyBehavior{
+		ID: "5220c66a-3411-48d6-9756-aa94a2fbe4ad", Scheme: "https", Host: "billing.internal",
+		Port: 443, Method: "POST", Path: "/check", Status: 409,
+		Headers: map[string][]string{"Content-Type": {"application/json"}}, Body: `{}`,
+	}
+	snapshot := DependencyBehaviorSnapshot{
+		EndpointID: "e9949642-8b35-4247-ac5d-c076a463058d", Behaviors: []DependencyBehavior{behavior},
+	}
+	message := Message{Version: Version, Type: TypeDependencyConfig, DependencyConfig: &snapshot}
+	if err := Validate(message); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Behaviors = append(snapshot.Behaviors, behavior)
+	if err := Validate(message); err == nil {
+		t.Fatal("duplicate enabled dependency matcher was accepted")
+	}
+	oversized := behavior
+	oversized.ID = "1b63f09a-ddc0-48fc-93e6-a8b1186d20df"
+	oversized.Body = strings.Repeat("x", MaxDependencyReplayBody+1)
+	snapshot.Behaviors = []DependencyBehavior{oversized}
+	if err := Validate(message); err == nil {
+		t.Fatal("oversized dependency replay body was accepted")
+	}
+}
+
 func FuzzDecode(f *testing.F) {
 	f.Add([]byte(`{"version":1,"type":"ping"}`))
 	f.Add([]byte(`{"version":1,"type":"request","requestId":"id","method":"GET","path":"/"}`))

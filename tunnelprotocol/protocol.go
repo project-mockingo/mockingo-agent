@@ -14,8 +14,11 @@ const (
 	MaxMessageSize = MaxBodySize*4/3 + 1<<20
 	// MaxDependencyMessageSize is enforced independently by the Gateway capture
 	// socket so an authenticated Agent cannot allocate arbitrary event payloads.
-	MaxDependencyMessageSize     = 2 << 20
-	MaxDependencyRequestPreview  = 256 << 10
-	MaxDependencyResponsePreview = 512 << 10
-	MaxDependencyHeaderBytes     = 256 << 10
+	MaxDependencyMessageSize       = 2 << 20
+	MaxDependencyRequestPreview    = 256 << 10
+	MaxDependencyResponsePreview   = 512 << 10
+	MaxDependencyHeaderBytes       = 256 << 10
+	MaxDependencyConfigMessageSize = 16 << 20
+	MaxDependencyBehaviors         = 1000
+	MaxDependencyReplayBody        = 1 << 20
 )

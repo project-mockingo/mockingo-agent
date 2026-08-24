@@ -1,6 +1,10 @@
 package dependencycapture
 
 import (
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -8,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/andybalholm/brotli"
 	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
@@ -71,20 +76,38 @@ func (w *previewWriter) observe(value []byte) {
 func capturedBody(headers http.Header, preview []byte, size int64, limit int) tunnelprotocol.CapturedBody {
 	contentType := normalizedContentType(headers.Get("Content-Type"))
 	result := tunnelprotocol.CapturedBody{ContentType: contentType, SizeBytes: size}
-	if encoding := strings.TrimSpace(headers.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
-		result.Reason = "encoded_content"
-		return result
-	}
 	if !isTextualContentType(contentType) {
 		result.Reason = "binary_content"
 		return result
+	}
+	if hasContentEncoding(headers.Get("Content-Encoding")) {
+		// The application must continue receiving the original encoded stream, so
+		// capture only decodes the bounded observation copy. A partial compressed
+		// stream cannot be decoded reliably and remains metadata-only.
+		if result.SizeBytes > int64(len(preview)) {
+			result.Reason = "encoded_content"
+			return result
+		}
+		decoded, truncated, err := decodeBodyPreview(preview, headers.Get("Content-Encoding"), limit)
+		if err != nil {
+			result.Reason = "encoded_content"
+			return result
+		}
+		preview = decoded
+		result.SizeBytes = int64(len(decoded))
+		if truncated {
+			// The exact decoded size is intentionally not computed beyond the
+			// capture bound. One extra byte preserves the protocol's truncation
+			// invariant without allowing decompression bombs into memory.
+			result.SizeBytes++
+		}
 	}
 	if len(preview) > limit {
 		preview = preview[:limit]
 	}
 	if !utf8.Valid(preview) {
 		valid := false
-		if size > int64(len(preview)) {
+		if result.SizeBytes > int64(len(preview)) {
 			for removed := 1; removed <= 3 && removed <= len(preview); removed++ {
 				candidate := preview[:len(preview)-removed]
 				if utf8.Valid(candidate) {
@@ -102,13 +125,68 @@ func capturedBody(headers http.Header, preview []byte, size int64, limit int) tu
 	result.Captured = true
 	result.Content = string(preview)
 	result.CapturedBytes = int64(len(preview))
-	result.Truncated = size > int64(len(preview))
+	result.Truncated = result.SizeBytes > int64(len(preview))
 	return result
 }
 
 func bodyCaptureAllowed(headers http.Header) bool {
-	encoding := strings.TrimSpace(headers.Get("Content-Encoding"))
-	return (encoding == "" || strings.EqualFold(encoding, "identity")) && isTextualContentType(normalizedContentType(headers.Get("Content-Type")))
+	return isTextualContentType(normalizedContentType(headers.Get("Content-Type")))
+}
+
+func hasContentEncoding(value string) bool {
+	for _, encoding := range strings.Split(value, ",") {
+		if normalized := strings.ToLower(strings.TrimSpace(encoding)); normalized != "" && normalized != "identity" {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeBodyPreview(source []byte, contentEncoding string, limit int) ([]byte, bool, error) {
+	var reader io.Reader = bytes.NewReader(source)
+	var closers []io.Closer
+	encodings := strings.Split(contentEncoding, ",")
+	for index := len(encodings) - 1; index >= 0; index-- {
+		switch encoding := strings.ToLower(strings.TrimSpace(encodings[index])); encoding {
+		case "", "identity":
+		case "gzip", "x-gzip":
+			decoded, err := gzip.NewReader(reader)
+			if err != nil {
+				closeAll(closers)
+				return nil, false, err
+			}
+			reader = decoded
+			closers = append(closers, decoded)
+		case "deflate":
+			decoded, err := zlib.NewReader(reader)
+			if err != nil {
+				closeAll(closers)
+				return nil, false, err
+			}
+			reader = decoded
+			closers = append(closers, decoded)
+		case "br":
+			reader = brotli.NewReader(reader)
+		default:
+			closeAll(closers)
+			return nil, false, errors.New("unsupported content encoding")
+		}
+	}
+	defer closeAll(closers)
+	decoded, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(decoded) > limit {
+		return decoded[:limit], true, nil
+	}
+	return decoded, false, nil
+}
+
+func closeAll(closers []io.Closer) {
+	for index := len(closers) - 1; index >= 0; index-- {
+		_ = closers[index].Close()
+	}
 }
 func normalizedContentType(value string) string {
 	mediaType, _, err := mime.ParseMediaType(value)

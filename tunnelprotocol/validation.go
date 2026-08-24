@@ -4,8 +4,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // Validate performs structural validation without applying gateway or local
@@ -33,6 +36,10 @@ func Validate(message Message) error {
 		if message.Dependency == nil || validateDependency(*message.Dependency) != nil {
 			return ErrInvalidMessage
 		}
+	case TypeDependencyConfig:
+		if message.DependencyConfig == nil || validateDependencyConfig(*message.DependencyConfig) != nil {
+			return ErrInvalidMessage
+		}
 	default:
 		return ErrUnknownMessageType
 	}
@@ -43,6 +50,7 @@ func validateDependency(value DependencyInteraction) error {
 	if value.ID == "" || (value.Scheme != "http" && value.Scheme != "https") ||
 		!validDependencyHost(value.Host) ||
 		value.Port < 1 || value.Port > 65535 || value.StartedAt.IsZero() || value.CompletedAt.IsZero() ||
+		(value.HandledBy != "" && value.HandledBy != "ORIGIN" && value.HandledBy != "REPLAY") ||
 		value.CompletedAt.Before(value.StartedAt) || value.DurationMS < 0 ||
 		value.Request.Method == "" || len(value.Request.Method) > 32 ||
 		value.Request.Path == "" || len(value.Request.Path) > 8192 || value.Request.Path[0] != '/' ||
@@ -54,6 +62,42 @@ func validateDependency(value DependencyInteraction) error {
 		return ErrInvalidMessage
 	}
 	return nil
+}
+
+func validateDependencyConfig(value DependencyBehaviorSnapshot) error {
+	if uuid.Validate(value.EndpointID) != nil || value.Behaviors == nil || len(value.Behaviors) > MaxDependencyBehaviors {
+		return ErrInvalidMessage
+	}
+	seen := make(map[string]struct{}, len(value.Behaviors))
+	for _, behavior := range value.Behaviors {
+		if uuid.Validate(behavior.ID) != nil ||
+			(behavior.Scheme != "http" && behavior.Scheme != "https") ||
+			!validDependencyHost(behavior.Host) || behavior.Host != strings.ToLower(behavior.Host) ||
+			behavior.Port < 1 || behavior.Port > 65535 || len(behavior.Method) > 32 || !validHTTPToken(behavior.Method) ||
+			behavior.Method != strings.ToUpper(behavior.Method) || !validExactDependencyPath(behavior.Path) ||
+			behavior.Status < 100 || behavior.Status > 599 || len(behavior.Body) > MaxDependencyReplayBody ||
+			validateHeaders(behavior.Headers) != nil {
+			return ErrInvalidMessage
+		}
+		key := behavior.Scheme + "\x00" + behavior.Host + "\x00" + strconv.Itoa(behavior.Port) + "\x00" + behavior.Method + "\x00" + behavior.Path
+		if _, duplicate := seen[key]; duplicate {
+			return ErrInvalidMessage
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validExactDependencyPath(path string) bool {
+	if path == "" || len(path) > 8192 || path[0] != '/' || strings.ContainsAny(path, "?#") {
+		return false
+	}
+	for _, character := range path {
+		if character <= 31 || character == 127 {
+			return false
+		}
+	}
+	return true
 }
 
 func validDependencyHost(host string) bool {
@@ -82,7 +126,7 @@ func validateHeaders(headers map[string][]string) error {
 	}
 	size := 0
 	for name, values := range headers {
-		if name == "" || strings.ContainsAny(name, "\r\n") || values == nil {
+		if !validHTTPToken(name) || values == nil {
 			return ErrInvalidMessage
 		}
 		size += len(name)
@@ -97,6 +141,21 @@ func validateHeaders(headers map[string][]string) error {
 		}
 	}
 	return nil
+}
+
+func validHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if !((character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCapturedBody(body CapturedBody, limit int) error {

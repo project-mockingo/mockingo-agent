@@ -2,6 +2,8 @@ package dependencycapture
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -14,10 +16,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/andybalholm/brotli"
 	"github.com/gorilla/websocket"
 	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
@@ -79,6 +83,47 @@ func TestHTTPProxyStreamsFullBodiesAndRedactsOnlyCapture(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyCapturesDecodedGzipWithoutChangingApplicationResponse(t *testing.T) {
+	payload := []byte(`{"code":"LIMIT_EXCEEDED","message":"captured decoded body"}`)
+	var encoded bytes.Buffer
+	gzipWriter := gzip.NewWriter(&encoded)
+	_, _ = gzipWriter.Write(payload)
+	_ = gzipWriter.Close()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "gzip" {
+			t.Errorf("Accept-Encoding = %q", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", strconv.Itoa(encoded.Len()))
+		_, _ = w.Write(encoded.Bytes())
+	}))
+	defer backend.Close()
+
+	events := make(chan tunnelprotocol.DependencyInteraction, 1)
+	client, stop := testProxyClient(t, ProxyConfig{Emit: func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true }}, nil)
+	defer stop()
+	req, _ := http.NewRequest(http.MethodGet, backend.URL+"/compressed", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applicationBody, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.Header.Get("Content-Encoding") != "gzip" || !bytes.Equal(applicationBody, encoded.Bytes()) {
+		t.Fatal("proxy changed the encoded response delivered to the application")
+	}
+	event := <-events
+	if !event.Response.Body.Captured || event.Response.Body.Truncated || event.Response.Body.Content != string(payload) {
+		t.Fatalf("decoded capture = %+v", event.Response.Body)
+	}
+	if event.Response.Body.SizeBytes != int64(len(payload)) || event.Response.SizeBytes != int64(encoded.Len()) {
+		t.Fatalf("decoded/wire sizes = %d/%d", event.Response.Body.SizeBytes, event.Response.SizeBytes)
+	}
+}
+
 func TestProxyForwardingSucceedsWhenTelemetryIsDropped(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("real response")) }))
 	defer backend.Close()
@@ -92,6 +137,140 @@ func TestProxyForwardingSucceedsWhenTelemetryIsDropped(t *testing.T) {
 	_ = response.Body.Close()
 	if string(body) != "real response" {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestDependencyBehaviorMatcherNormalizesAndIgnoresQuery(t *testing.T) {
+	store := NewBehaviorStore()
+	snapshot := tunnelprotocol.DependencyBehaviorSnapshot{
+		EndpointID: "e9949642-8b35-4247-ac5d-c076a463058d",
+		Behaviors: []tunnelprotocol.DependencyBehavior{{
+			ID: "5220c66a-3411-48d6-9756-aa94a2fbe4ad", Scheme: "https", Host: "billing.internal",
+			Port: 443, Method: "POST", Path: "/check", Status: 409, Headers: map[string][]string{},
+		}},
+	}
+	if err := store.Replace(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := store.Match("HTTPS", "BILLING.INTERNAL.", 443, "post", "/check"); !found {
+		t.Fatal("normalized matcher did not match")
+	}
+	for _, candidate := range []struct {
+		scheme, host, method, path string
+		port                       int
+	}{
+		{"http", "billing.internal", "POST", "/check", 443},
+		{"https", "other.internal", "POST", "/check", 443},
+		{"https", "billing.internal", "POST", "/check", 8443},
+		{"https", "billing.internal", "GET", "/check", 443},
+		{"https", "billing.internal", "POST", "/check/", 443},
+		{"https", "billing.internal", "POST", "/check/123", 443},
+	} {
+		if _, found := store.Match(candidate.scheme, candidate.host, candidate.port, candidate.method, candidate.path); found {
+			t.Fatalf("unexpected match for %+v", candidate)
+		}
+	}
+}
+
+func TestDependencyTargetsUseEffectiveDefaultPorts(t *testing.T) {
+	for _, candidate := range []struct {
+		authority, scheme, host string
+		port                    int
+	}{
+		{"billing.internal", "http", "billing.internal", 80},
+		{"billing.internal", "https", "billing.internal", 443},
+		{"BILLING.INTERNAL.:8443", "https", "billing.internal", 8443},
+	} {
+		host, port, err := targetHostPort(candidate.authority, candidate.scheme)
+		if err != nil || host != candidate.host || port != candidate.port {
+			t.Fatalf("target %s %s = %s:%d err=%v", candidate.scheme, candidate.authority, host, port, err)
+		}
+	}
+}
+
+func TestOfflineHTTPReplayConsumesBodyAndNeverDialsOrigin(t *testing.T) {
+	store := NewBehaviorStore()
+	if err := store.Replace(testBehaviorSnapshot("http", "unavailable-target.test", 12345, "POST", "/hello")); err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan tunnelprotocol.DependencyInteraction, 1)
+	client, stop := testProxyClient(t, ProxyConfig{Behaviors: store, Emit: func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true }}, nil)
+	defer stop()
+	requestBody := bytes.Repeat([]byte("request-body"), 1024)
+	request, _ := http.NewRequest(http.MethodPost, "http://unavailable-target.test:12345/hello?ignored=yes", bytes.NewReader(requestBody))
+	request.Header.Set("Content-Type", "text/plain")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict || string(body) != `{"code":"OFFLINE"}` {
+		t.Fatalf("response status=%d body=%q", response.StatusCode, body)
+	}
+	if response.Header.Get("Content-Encoding") != "" || response.Header.Get("Set-Cookie") != "" {
+		t.Fatalf("unsafe replay headers leaked: %v", response.Header)
+	}
+	event := <-events
+	if event.HandledBy != "REPLAY" || event.Request.SizeBytes != int64(len(requestBody)) || event.Request.RawQuery != "ignored=yes" {
+		t.Fatalf("replay event = %+v", event)
+	}
+}
+
+func TestOfflineHTTPSReplayDoesNotContactOrigin(t *testing.T) {
+	store := NewBehaviorStore()
+	if err := store.Replace(testBehaviorSnapshot("https", "unavailable-target.test", 443, "GET", "/secure")); err != nil {
+		t.Fatal(err)
+	}
+	client, stop := testProxyClient(t, ProxyConfig{Behaviors: store}, nil)
+	defer stop()
+	response, err := client.Get("https://unavailable-target.test/secure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict || string(body) != `{"code":"OFFLINE"}` {
+		t.Fatalf("response status=%d body=%q", response.StatusCode, body)
+	}
+}
+
+func TestHTTPSKeepAliveMixesReplayAndOriginPerRequest(t *testing.T) {
+	var originRequests atomic.Int32
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originRequests.Add(1)
+		_, _ = w.Write([]byte("origin:" + r.URL.Path))
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	host, port, err := targetHostPort(target.Host, "https")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewBehaviorStore()
+	if err := store.Replace(testBehaviorSnapshot("https", host, port, "GET", "/mocked")); err != nil {
+		t.Fatal(err)
+	}
+	upstreamRoots := x509.NewCertPool()
+	upstreamRoots.AddCert(backend.Certificate())
+	client, stop := testProxyClient(t, ProxyConfig{Behaviors: store, UpstreamRootCAs: upstreamRoots}, nil)
+	defer stop()
+	for _, path := range []string{"/mocked", "/real", "/mocked"} {
+		response, err := client.Get(backend.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if path == "/real" && string(body) != "origin:/real" {
+			t.Fatalf("origin body = %q", body)
+		}
+		if path == "/mocked" && string(body) != `{"code":"OFFLINE"}` {
+			t.Fatalf("replay body = %q", body)
+		}
+	}
+	if originRequests.Load() != 1 {
+		t.Fatalf("origin requests = %d, want 1", originRequests.Load())
 	}
 }
 
@@ -126,8 +305,14 @@ func TestHTTPSPassthroughPreservesBackendIdentityAndEmitsNoHTTPEvent(t *testing.
 	defer backend.Close()
 	backendRoots := x509.NewCertPool()
 	backendRoots.AddCert(backend.Certificate())
+	target, _ := url.Parse(backend.URL)
+	host, port, _ := targetHostPort(target.Host, "https")
+	store := NewBehaviorStore()
+	if err := store.Replace(testBehaviorSnapshot("https", host, port, "GET", "/")); err != nil {
+		t.Fatal(err)
+	}
 	var emitted atomic.Int32
-	client, stop := testProxyClient(t, ProxyConfig{PassthroughHosts: []string{"127.0.0.1"}, Emit: func(tunnelprotocol.DependencyInteraction) bool { emitted.Add(1); return true }}, backendRoots)
+	client, stop := testProxyClient(t, ProxyConfig{PassthroughHosts: []string{"127.0.0.1"}, Behaviors: store, Emit: func(tunnelprotocol.DependencyInteraction) bool { emitted.Add(1); return true }}, backendRoots)
 	defer stop()
 	response, err := client.Get(backend.URL)
 	if err != nil {
@@ -272,6 +457,59 @@ func TestUploaderReconnectsWithoutBlockingProxyTelemetryProducer(t *testing.T) {
 	}
 }
 
+func TestLoadedBehaviorSurvivesCaptureConnectionLoss(t *testing.T) {
+	snapshot := testBehaviorSnapshot("http", "offline.internal", 80, "GET", "/ready")
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = connection.WriteJSON(tunnelprotocol.Message{
+			Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeDependencyConfig,
+			DependencyConfig: &snapshot,
+		})
+		_ = connection.Close()
+	}))
+	defer server.Close()
+	store := NewBehaviorStore()
+	loaded := make(chan struct{})
+	var loadedOnce sync.Once
+	connectURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	session := CaptureSession{EndpointID: snapshot.EndpointID, ConnectURL: connectURL, Ticket: "ticket"}
+	uploader := NewUploader(UploaderConfig{
+		InitialSession: &session,
+		AcquireSession: func(context.Context) (CaptureSession, error) { return session, nil },
+		Retryable:      func(error) bool { return true }, ReconnectInitialDelay: time.Second,
+		OnConfig: func(value tunnelprotocol.DependencyBehaviorSnapshot) error {
+			if err := store.Replace(value); err != nil {
+				return err
+			}
+			loadedOnce.Do(func() { close(loaded) })
+			return nil
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- uploader.Run(ctx) }()
+	select {
+	case <-loaded:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("snapshot was not loaded")
+	}
+	// The server has already closed the capture socket. Disconnect does not
+	// clear the atomic last-known configuration.
+	if _, found := store.Match("http", "offline.internal", 80, "GET", "/ready"); !found {
+		cancel()
+		t.Fatal("last-known dependency replay was cleared on disconnect")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProxyReportsPortConflict(t *testing.T) {
 	ca, _, err := LoadOrCreateCA(t.TempDir())
 	if err != nil {
@@ -304,7 +542,7 @@ func TestProxyReportsPortConflict(t *testing.T) {
 	}
 }
 
-func TestBinaryAndEncodedBodiesAreMetadataOnly(t *testing.T) {
+func TestBinaryUnsupportedEncodedAndCompressedBodies(t *testing.T) {
 	binaryHeaders := http.Header{"Content-Type": []string{"application/octet-stream"}}
 	binary := capturedBody(binaryHeaders, []byte{0, 1, 2}, 3, 16)
 	if binary.Captured || binary.Reason != "binary_content" || binary.SizeBytes != 3 {
@@ -313,11 +551,32 @@ func TestBinaryAndEncodedBodiesAreMetadataOnly(t *testing.T) {
 
 	encodedHeaders := http.Header{
 		"Content-Type":     []string{"text/plain"},
-		"Content-Encoding": []string{"gzip"},
+		"Content-Encoding": []string{"compress"},
 	}
 	encoded := capturedBody(encodedHeaders, []byte("compressed"), 10, 16)
 	if encoded.Captured || encoded.Reason != "encoded_content" || encoded.SizeBytes != 10 {
 		t.Fatalf("encoded body = %+v", encoded)
+	}
+
+	payload := []byte(`{"message":"decoded"}`)
+	var deflated bytes.Buffer
+	deflateWriter := zlib.NewWriter(&deflated)
+	_, _ = deflateWriter.Write(payload)
+	_ = deflateWriter.Close()
+	var brotliEncoded bytes.Buffer
+	brotliWriter := brotli.NewWriter(&brotliEncoded)
+	_, _ = brotliWriter.Write(payload)
+	_ = brotliWriter.Close()
+	for name, value := range map[string][]byte{"deflate": deflated.Bytes(), "br": brotliEncoded.Bytes()} {
+		captured := capturedBody(
+			http.Header{"Content-Type": []string{"application/json"}, "Content-Encoding": []string{name}},
+			value,
+			int64(len(value)),
+			64,
+		)
+		if !captured.Captured || captured.Truncated || captured.Content != string(payload) || captured.SizeBytes != int64(len(payload)) {
+			t.Fatalf("%s body = %+v", name, captured)
+		}
 	}
 }
 
@@ -368,4 +627,19 @@ func testProxyClient(t *testing.T, config ProxyConfig, clientRoots *x509.CertPoo
 func validTestEvent() tunnelprotocol.DependencyInteraction {
 	now := time.Now().UTC()
 	return tunnelprotocol.DependencyInteraction{ID: "d0ab19d5-093a-49f5-b508-c656adc9b76f", Scheme: "http", Host: "example.test", Port: 80, StartedAt: now, CompletedAt: now, Request: tunnelprotocol.CapturedRequest{Method: "GET", Path: "/", Headers: map[string][]string{}, Body: tunnelprotocol.CapturedBody{}, SizeBytes: 0}, Response: tunnelprotocol.CapturedResponse{Status: 200, Headers: map[string][]string{}, Body: tunnelprotocol.CapturedBody{}, SizeBytes: 0}}
+}
+
+func testBehaviorSnapshot(scheme, host string, port int, method, path string) tunnelprotocol.DependencyBehaviorSnapshot {
+	return tunnelprotocol.DependencyBehaviorSnapshot{
+		EndpointID: "e9949642-8b35-4247-ac5d-c076a463058d",
+		Behaviors: []tunnelprotocol.DependencyBehavior{{
+			ID: "5220c66a-3411-48d6-9756-aa94a2fbe4ad", Scheme: scheme, Host: host, Port: port,
+			Method: method, Path: path, Status: http.StatusConflict,
+			Headers: map[string][]string{
+				"Content-Type": {"application/json"}, "Content-Encoding": {"gzip"},
+				"Set-Cookie": {"must-not-pass=1"},
+			},
+			Body: `{"code":"OFFLINE"}`,
+		}},
+	}
 }

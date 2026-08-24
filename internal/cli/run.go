@@ -151,6 +151,7 @@ func (a *App) capture(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	behaviors := dependencycapture.NewBehaviorStore()
 	uploader := dependencycapture.NewUploader(dependencycapture.UploaderConfig{
 		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable,
 		QueueSize: 100, ReconnectInitialDelay: options.ReconnectInitialDelay,
@@ -159,6 +160,20 @@ func (a *App) capture(ctx context.Context, args []string) (int, error) {
 		OnDrop: func() {
 			fmt.Fprintln(a.Stderr, "Warning: dependency capture telemetry was dropped; proxy forwarding is unaffected.")
 		},
+		OnConfig: func(snapshot tunnelprotocol.DependencyBehaviorSnapshot) error {
+			if err := behaviors.Replace(snapshot); err != nil {
+				return err
+			}
+			for _, behavior := range snapshot.Behaviors {
+				for _, passthrough := range options.PassthroughHosts {
+					if strings.EqualFold(strings.TrimSuffix(behavior.Host, "."), strings.TrimSuffix(passthrough, ".")) {
+						fmt.Fprintf(a.Stderr, "Warning: dependency replay %s is inactive because %s is configured for HTTPS passthrough.\n", behavior.ID, behavior.Host)
+					}
+				}
+			}
+			fmt.Fprintf(a.Stdout, "Dependency replay configuration loaded: %d active.\n", len(snapshot.Behaviors))
+			return nil
+		},
 	})
 	var verbose func(string, ...any)
 	if options.Verbose {
@@ -166,7 +181,7 @@ func (a *App) capture(ctx context.Context, args []string) (int, error) {
 	}
 	proxy, err := dependencycapture.NewProxy(dependencycapture.ProxyConfig{
 		Port: options.ProxyPort, CA: ca, PassthroughHosts: options.PassthroughHosts,
-		Emit: uploader.Enqueue, Verbose: verbose,
+		Behaviors: behaviors, Emit: uploader.Enqueue, Verbose: verbose,
 		OnCompleted: func(event tunnelprotocol.DependencyInteraction) {
 			fmt.Fprintf(a.Stdout, "%s %s://%s%s %d %dms\n", event.Request.Method, event.Scheme, event.Host, event.Request.Path, event.Response.Status, event.DurationMS)
 		},
@@ -185,7 +200,7 @@ func (a *App) capture(ctx context.Context, args []string) (int, error) {
 	uploadDone := make(chan error, 1)
 	go func() { proxyDone <- proxy.Serve(runCtx, listener) }()
 	go func() { uploadDone <- uploader.Run(runCtx) }()
-	fmt.Fprintf(a.Stdout, "\nDependency capture started\n\nEndpoint       %s\nProxy          http://127.0.0.1:%d\nHTTPS          inspection enabled (HTTP/1.1)\nCA certificate %s\n\nConfigure your application manually to use this proxy.\nTrust the CA certificate in the application runtime for HTTPS.\n\nWaiting for dependency traffic...\n\nPress Ctrl+C to stop.\n", options.Name, options.ProxyPort, certificatePath)
+	fmt.Fprintf(a.Stdout, "\nDependency proxy started\n\nEndpoint       %s\nProxy          http://127.0.0.1:%d\nHTTPS          inspection enabled (HTTP/1.1)\nCA certificate %s\nReplays        %d active (waiting for cloud snapshot)\n\nConfigure your application manually to use this proxy.\nTrust the CA certificate in the application runtime for HTTPS.\n\nWaiting for dependency traffic...\n\nPress Ctrl+C to stop.\n", options.Name, options.ProxyPort, certificatePath, behaviors.Count())
 	for {
 		select {
 		case err := <-proxyDone:

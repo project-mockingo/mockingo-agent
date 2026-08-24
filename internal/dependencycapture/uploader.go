@@ -36,6 +36,7 @@ type UploaderConfig struct {
 	OnState               func(string)
 	OnDrop                func()
 	OnSent                func()
+	OnConfig              func(tunnelprotocol.DependencyBehaviorSnapshot) error
 	Verbose               func(string, ...any)
 }
 
@@ -160,7 +161,7 @@ func (u *Uploader) Run(ctx context.Context) error {
 			}
 		}
 		connectedOnce = true
-		if err := u.serveConnection(ctx, ws); ctx.Err() != nil {
+		if err := u.serveConnection(ctx, ws, session.EndpointID); ctx.Err() != nil {
 			return nil
 		} else if u.config.Verbose != nil {
 			u.config.Verbose("dependency capture connection lost: %v", err)
@@ -175,9 +176,9 @@ func (u *Uploader) Run(ctx context.Context) error {
 	}
 }
 
-func (u *Uploader) serveConnection(ctx context.Context, ws *websocket.Conn) error {
+func (u *Uploader) serveConnection(ctx context.Context, ws *websocket.Conn, endpointID string) error {
 	defer ws.Close()
-	ws.SetReadLimit(1 << 20)
+	ws.SetReadLimit(tunnelprotocol.MaxDependencyConfigMessageSize)
 	readErrors := make(chan error, 1)
 	go func() {
 		for {
@@ -185,6 +186,22 @@ func (u *Uploader) serveConnection(ctx context.Context, ws *websocket.Conn) erro
 			if err := ws.ReadJSON(&message); err != nil {
 				readErrors <- err
 				return
+			}
+			if err := tunnelprotocol.Validate(message); err != nil {
+				readErrors <- err
+				return
+			}
+			if message.Type == tunnelprotocol.TypeDependencyConfig {
+				if message.DependencyConfig.EndpointID != endpointID {
+					readErrors <- errors.New("dependency configuration endpoint does not match the capture session")
+					return
+				}
+				if u.config.OnConfig != nil {
+					if err := u.config.OnConfig(*message.DependencyConfig); err != nil {
+						readErrors <- err
+						return
+					}
+				}
 			}
 		}
 	}()
