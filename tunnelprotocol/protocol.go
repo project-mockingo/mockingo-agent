@@ -12,4 +12,10 @@ const (
 	MaxBodySize = 10 << 20 // 10 MiB
 	// MaxMessageSize accounts for base64 and JSON envelope overhead.
 	MaxMessageSize = MaxBodySize*4/3 + 1<<20
+	// MaxDependencyMessageSize is enforced independently by the Gateway capture
+	// socket so an authenticated Agent cannot allocate arbitrary event payloads.
+	MaxDependencyMessageSize     = 2 << 20
+	MaxDependencyRequestPreview  = 256 << 10
+	MaxDependencyResponsePreview = 512 << 10
+	MaxDependencyHeaderBytes     = 256 << 10
 )

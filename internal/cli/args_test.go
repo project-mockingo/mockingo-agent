@@ -54,3 +54,18 @@ func TestRemovedExposeOptionsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCaptureUsesLoopbackProxyOptions(t *testing.T) {
+	options, err := ParseCapture([]string{"--name", "integration", "--proxy-port", "9000", "--passthrough-host", "Auth.Company.com", "--passthrough-host", "auth.company.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Name != "integration" || options.ProxyPort != 9000 || len(options.PassthroughHosts) != 1 || options.PassthroughHosts[0] != "auth.company.com" {
+		t.Fatalf("options = %#v", options)
+	}
+	for _, args := range [][]string{{"--name", "demo", "--proxy-port", "0"}, {"--name", "demo", "--passthrough-host", "*.example.com"}, {"--name", "demo", "command"}} {
+		if _, err := ParseCapture(args); err == nil {
+			t.Fatalf("invalid capture arguments accepted: %#v", args)
+		}
+	}
+}

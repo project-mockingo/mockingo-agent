@@ -225,6 +225,7 @@ func endpointVirtualizedDisconnect(err error) bool {
 // behavior without mutating global state.
 func dialWebSocket(ctx context.Context, connectURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
 	dialer := *websocket.DefaultDialer
+	dialer.Proxy = nil
 	baseDial := dialer.NetDialContext
 	if baseDial == nil {
 		networkDialer := &net.Dialer{Timeout: dialer.HandshakeTimeout}

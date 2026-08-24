@@ -12,7 +12,11 @@ func Encode(message Message) ([]byte, error) {
 	if err := Validate(message); err != nil {
 		return nil, err
 	}
-	return json.Marshal(message)
+	data, err := json.Marshal(message)
+	if err == nil && message.Type == TypeDependencyInteraction && len(data) > MaxDependencyMessageSize {
+		return nil, ErrMessageTooLarge
+	}
+	return data, err
 }
 
 // Decode unmarshals one bounded protocol v1 JSON message. Unknown JSON fields

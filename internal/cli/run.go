@@ -15,10 +15,12 @@ import (
 	"github.com/project-mockingo/mockingo-agent/internal/agent"
 	"github.com/project-mockingo/mockingo-agent/internal/apiclient"
 	"github.com/project-mockingo/mockingo-agent/internal/config"
+	"github.com/project-mockingo/mockingo-agent/internal/dependencycapture"
 	"github.com/project-mockingo/mockingo-agent/internal/naming"
 	"github.com/project-mockingo/mockingo-agent/internal/oauth"
 	"github.com/project-mockingo/mockingo-agent/internal/process"
 	"github.com/project-mockingo/mockingo-agent/internal/readiness"
+	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
 type App struct {
@@ -49,6 +51,8 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.logout(ctx, args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
+	case "capture":
+		code, err = a.capture(ctx, args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -74,7 +78,156 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "  mockingo capture --name NAME [--proxy-port PORT] [--passthrough-host HOST]")
 	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
+}
+
+func (a *App) capture(ctx context.Context, args []string) (int, error) {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			a.captureUsage()
+			return 0, nil
+		}
+	}
+	options, err := ParseCapture(args)
+	if err != nil {
+		return 2, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if err := naming.Validate(options.Name); err != nil {
+		return 2, fmt.Errorf("invalid arguments: %w", err)
+	}
+	path, err := a.path()
+	if err != nil {
+		return 1, fmt.Errorf("configuration error: %w", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		if errors.Is(err, config.ErrNotConfigured) {
+			return 1, apiclient.ErrNotSignedIn
+		}
+		return 1, fmt.Errorf("configuration error: %w", err)
+	}
+	if cfg.OAuthIssuer == "" || cfg.OAuthClientID == "" || cfg.APIURL == "" {
+		return 1, apiclient.ErrNotSignedIn
+	}
+	metadata, err := oauth.Discover(ctx, a.httpClient(), cfg.OAuthIssuer)
+	if err != nil {
+		return 1, err
+	}
+	apiURL := cfg.APIURL
+	if options.APIURL != "" {
+		apiURL, err = validateAPIURL(options.APIURL)
+		if err != nil {
+			return 2, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	controlClient := &apiclient.Client{
+		HTTP: a.httpClient(), APIURL: apiURL, Issuer: cfg.OAuthIssuer,
+		ClientID: cfg.OAuthClientID, Scopes: strings.Fields(cfg.OAuthScopes), Metadata: metadata,
+		Store: a.credentialStore(path, options.AllowFileCredentials),
+	}
+	identity, err := controlClient.Me(ctx)
+	if err != nil {
+		return 1, err
+	}
+	fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
+	ca, certificatePath, err := dependencycapture.LoadOrCreateCA("")
+	if err != nil {
+		return 1, fmt.Errorf("cannot prepare HTTPS inspection CA: %w", err)
+	}
+	validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
+	createSession := func(sessionCtx context.Context) (dependencycapture.CaptureSession, error) {
+		response, createErr := controlClient.CreateDependencyCaptureSession(sessionCtx, options.Name, validation)
+		if createErr != nil {
+			return dependencycapture.CaptureSession{}, mapCaptureSessionError(options.Name, createErr)
+		}
+		return dependencycapture.CaptureSession{
+			EndpointID: response.Endpoint.ID, EndpointName: response.Endpoint.Name,
+			SessionID: response.Capture.SessionID, ConnectURL: response.Capture.ConnectURL,
+			Ticket: response.Capture.Ticket,
+		}, nil
+	}
+	initial, err := createSession(ctx)
+	if err != nil {
+		return 1, err
+	}
+	uploader := dependencycapture.NewUploader(dependencycapture.UploaderConfig{
+		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable,
+		QueueSize: 100, ReconnectInitialDelay: options.ReconnectInitialDelay,
+		ReconnectMaxDelay: options.ReconnectMaxDelay,
+		OnState:           func(message string) { fmt.Fprintln(a.Stdout, message) },
+		OnDrop: func() {
+			fmt.Fprintln(a.Stderr, "Warning: dependency capture telemetry was dropped; proxy forwarding is unaffected.")
+		},
+	})
+	var verbose func(string, ...any)
+	if options.Verbose {
+		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
+	}
+	proxy, err := dependencycapture.NewProxy(dependencycapture.ProxyConfig{
+		Port: options.ProxyPort, CA: ca, PassthroughHosts: options.PassthroughHosts,
+		Emit: uploader.Enqueue, Verbose: verbose,
+		OnCompleted: func(event tunnelprotocol.DependencyInteraction) {
+			fmt.Fprintf(a.Stdout, "%s %s://%s%s %d %dms\n", event.Request.Method, event.Scheme, event.Host, event.Request.Path, event.Response.Status, event.DurationMS)
+		},
+	})
+	if err != nil {
+		return 1, err
+	}
+	listener, err := proxy.Listen()
+	if err != nil {
+		return 1, fmt.Errorf("cannot start dependency proxy on 127.0.0.1:%d: the port may already be in use; use --proxy-port to choose another port: %w", options.ProxyPort, err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer proxy.CloseIdleConnections()
+	proxyDone := make(chan error, 1)
+	uploadDone := make(chan error, 1)
+	go func() { proxyDone <- proxy.Serve(runCtx, listener) }()
+	go func() { uploadDone <- uploader.Run(runCtx) }()
+	fmt.Fprintf(a.Stdout, "\nDependency capture started\n\nEndpoint       %s\nProxy          http://127.0.0.1:%d\nHTTPS          inspection enabled (HTTP/1.1)\nCA certificate %s\n\nConfigure your application manually to use this proxy.\nTrust the CA certificate in the application runtime for HTTPS.\n\nWaiting for dependency traffic...\n\nPress Ctrl+C to stop.\n", options.Name, options.ProxyPort, certificatePath)
+	for {
+		select {
+		case err := <-proxyDone:
+			cancel()
+			if uploadDone != nil {
+				<-uploadDone
+			}
+			if err != nil {
+				return 1, fmt.Errorf("dependency proxy stopped: %w", err)
+			}
+			return 0, nil
+		case err := <-uploadDone:
+			uploadDone = nil
+			if err != nil {
+				fmt.Fprintf(a.Stderr, "Warning: dependency capture upload stopped: %v. Proxy forwarding continues.\n", err)
+			} else {
+				fmt.Fprintln(a.Stderr, "Warning: dependency capture upload stopped. Proxy forwarding continues.")
+			}
+		case <-ctx.Done():
+			cancel()
+			<-proxyDone
+			if uploadDone != nil {
+				<-uploadDone
+			}
+			fmt.Fprintln(a.Stdout, "Dependency capture stopped.")
+			return 0, nil
+		}
+	}
+}
+
+func (a *App) captureUsage() {
+	fmt.Fprintln(a.Stdout, "Usage: mockingo capture --name NAME [options]")
+	fmt.Fprintln(a.Stdout, "")
+	fmt.Fprintln(a.Stdout, "Options: --proxy-port, --passthrough-host (repeatable), --api-url, --expected-gateway-host, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --verbose")
+}
+
+func mapCaptureSessionError(name string, err error) error {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Problem.Code == "endpoint_not_found" {
+		return fmt.Errorf("Endpoint %q was not found or is not accessible.", name)
+	}
+	return err
 }
 
 func (a *App) path() (string, error) {

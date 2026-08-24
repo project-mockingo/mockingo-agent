@@ -70,7 +70,9 @@ func (a *App) httpClient() *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
 }
 
 func (a *App) credentialStore(configPath string, allowFile bool) oauth.CredentialStore {

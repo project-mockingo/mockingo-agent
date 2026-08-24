@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -36,6 +37,116 @@ type ExposeOptions struct {
 	ReconnectMaxDelay     time.Duration
 	AllowInsecureGateway  bool
 	AllowFileCredentials  bool
+}
+
+type stringFlags []string
+
+func (f *stringFlags) String() string { return strings.Join(*f, ",") }
+func (f *stringFlags) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("value must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+type CaptureOptions struct {
+	Name                  string
+	ProxyPort             int
+	PassthroughHosts      []string
+	Verbose               bool
+	APIURL                string
+	ExpectedGatewayHost   string
+	ReconnectInitialDelay time.Duration
+	ReconnectMaxDelay     time.Duration
+	AllowInsecureGateway  bool
+	AllowFileCredentials  bool
+}
+
+func ParseCapture(args []string) (CaptureOptions, error) {
+	var options CaptureOptions
+	var passthrough stringFlags
+	allowInsecure, err := envBool("MOCKINGO_ALLOW_INSECURE_GATEWAY", false)
+	if err != nil {
+		return options, err
+	}
+	allowFile, err := envBool("MOCKINGO_ALLOW_FILE_CREDENTIALS", false)
+	if err != nil {
+		return options, err
+	}
+	initialDelay, err := envDuration("MOCKINGO_RECONNECT_INITIAL_DELAY", time.Second)
+	if err != nil {
+		return options, err
+	}
+	maxDelay, err := envDuration("MOCKINGO_RECONNECT_MAX_DELAY", 30*time.Second)
+	if err != nil {
+		return options, err
+	}
+	options.AllowInsecureGateway = allowInsecure
+	options.AllowFileCredentials = allowFile
+	options.ReconnectInitialDelay = initialDelay
+	options.ReconnectMaxDelay = maxDelay
+	set := flag.NewFlagSet("capture", flag.ContinueOnError)
+	set.SetOutput(new(strings.Builder))
+	set.StringVar(&options.Name, "name", "", "endpoint name")
+	set.IntVar(&options.ProxyPort, "proxy-port", 8899, "loopback dependency proxy port")
+	set.Var(&passthrough, "passthrough-host", "exact HTTPS hostname to tunnel without inspection")
+	set.BoolVar(&options.Verbose, "verbose", false, "verbose diagnostics")
+	set.StringVar(&options.APIURL, "api-url", envString("MOCKINGO_API_URL", ""), "Mockingo control-plane API URL")
+	set.StringVar(&options.ExpectedGatewayHost, "expected-gateway-host", envString("MOCKINGO_EXPECTED_GATEWAY_HOST", "gateway.mockingo.com"), "trusted gateway hostname (comma-separated)")
+	set.DurationVar(&options.ReconnectInitialDelay, "reconnect-initial-delay", options.ReconnectInitialDelay, "initial reconnect delay")
+	set.DurationVar(&options.ReconnectMaxDelay, "reconnect-max-delay", options.ReconnectMaxDelay, "maximum reconnect delay")
+	set.BoolVar(&options.AllowInsecureGateway, "allow-insecure-gateway", options.AllowInsecureGateway, "allow ws:// for an explicitly trusted loopback gateway")
+	set.BoolVar(&options.AllowFileCredentials, "allow-insecure-storage", options.AllowFileCredentials, "allow owner-only fallback OAuth credential storage")
+	if err := set.Parse(args); err != nil {
+		return CaptureOptions{}, err
+	}
+	if len(set.Args()) != 0 {
+		return CaptureOptions{}, errors.New("capture does not launch an application; unexpected positional arguments")
+	}
+	if options.Name == "" {
+		return CaptureOptions{}, errors.New("--name is required")
+	}
+	if options.ProxyPort < 1 || options.ProxyPort > 65535 {
+		return CaptureOptions{}, errors.New("--proxy-port must be between 1 and 65535")
+	}
+	if options.ReconnectInitialDelay <= 0 || options.ReconnectMaxDelay < options.ReconnectInitialDelay {
+		return CaptureOptions{}, errors.New("reconnect delays must be positive and maximum must not be less than initial")
+	}
+	if strings.TrimSpace(options.ExpectedGatewayHost) == "" {
+		return CaptureOptions{}, errors.New("--expected-gateway-host is required")
+	}
+	seen := make(map[string]struct{})
+	for _, host := range passthrough {
+		host = strings.ToLower(strings.TrimSuffix(host, "."))
+		if net.ParseIP(host) == nil && !validProxyHost(host) {
+			return CaptureOptions{}, fmt.Errorf("invalid --passthrough-host %q", host)
+		}
+		seen[host] = struct{}{}
+	}
+	options.PassthroughHosts = make([]string, 0, len(seen))
+	for host := range seen {
+		options.PassthroughHosts = append(options.PassthroughHosts, host)
+	}
+	return options, nil
+}
+
+func validProxyHost(host string) bool {
+	if host == "" || len(host) > 253 || strings.ContainsAny(host, "/\\:@ \t\r\n") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func envBool(name string, fallback bool) (bool, error) {
