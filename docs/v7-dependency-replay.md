@@ -1,10 +1,15 @@
 # V7 dependency replay
 
-The existing command now provides both dependency capture and local replay:
+`expose` now provides the public tunnel, dependency capture, and local replay
+in one process by default:
 
 ```bash
-mockingo capture --name integration
+mockingo expose --name integration --http 8080
 ```
+
+Use `--dependency-proxy=false` to run only the public tunnel. The existing
+`mockingo capture --name integration` command remains available when no inbound
+tunnel is needed or the endpoint is Virtual.
 
 Configure the application manually to use the printed HTTP proxy and trust the
 printed Capture CA for inspected HTTPS, exactly as in V6. Then:

@@ -17,7 +17,6 @@ public request --> https://<endpoint-name>.mockingo.click --> localhost
 mockingo login
 mockingo whoami
 mockingo expose --name spring-demo --http 8080
-mockingo capture --name spring-demo
 mockingo logout
 ```
 
@@ -35,8 +34,9 @@ For a different deployment, pass `--api-url` or set `MOCKINGO_API_URL`; explicit
 advertised by the control plane.
 
 `mockingo expose` sends the OAuth access token only to the Spring Boot control
-plane. It validates the returned gateway URL and sends the returned one-use
-tunnel ticket only to `/v1/connect`. Every reconnect requests a new backend
+plane. It validates returned Gateway URLs, sends the public-tunnel ticket only
+to `/v1/connect`, and sends the separate dependency-capture ticket only to
+`/v1/dependency-capture/connect`. Every reconnect requests a new backend
 session and ticket; tickets are never persisted or logged.
 
 Static gateway tokens, direct gateway endpoint CRUD, direct registration, and
@@ -44,10 +44,15 @@ legacy token login/expose modes are not supported.
 
 ## Dependency capture and replay
 
-`mockingo capture --name <endpoint>` starts an independent, loopback-only
-explicit HTTP/S proxy on `127.0.0.1:8899`. It prints the proxy URL and the
-public local CA certificate path; it never changes application environment
-variables, operating-system proxy settings, or trust stores. See
+`mockingo expose --name <endpoint> --http <port>` starts the public tunnel and,
+by default, a loopback-only explicit dependency HTTP/S proxy on
+`127.0.0.1:8899`. Use `--dependency-proxy=false` to opt out. The standalone
+`mockingo capture --name <endpoint>` command remains available for
+dependency-only and Virtual-endpoint workflows.
+
+Both commands print the proxy URL and public local CA certificate path; they
+never change application environment variables, operating-system proxy
+settings, or trust stores. See
 [`docs/v6-dependency-capture.md`](docs/v6-dependency-capture.md) for setup,
 security boundaries, passthrough, and HTTPS limitations. Enabled dependency
 replays are delivered over the capture session and matched locally before any

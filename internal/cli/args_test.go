@@ -32,6 +32,9 @@ func TestExposeHelpIsOAuthOnly(t *testing.T) {
 	if strings.Contains(output.String(), "--legacy") || strings.Contains(output.String(), "--token") {
 		t.Fatalf("removed option appears in help: %s", output.String())
 	}
+	if !strings.Contains(output.String(), "--dependency-proxy=false") || !strings.Contains(output.String(), "--proxy-port") {
+		t.Fatalf("dependency proxy defaults are missing from help: %s", output.String())
+	}
 }
 
 func TestParseExposePreservesCommandArguments(t *testing.T) {
@@ -44,6 +47,29 @@ func TestParseExposePreservesCommandArguments(t *testing.T) {
 	want := []string{"java", "-Dmessage=hello world", "-jar", "app.jar"}
 	if !reflect.DeepEqual(options.Command, want) {
 		t.Fatalf("command = %#v, want %#v", options.Command, want)
+	}
+	if !options.DependencyProxy || options.ProxyPort != 8899 {
+		t.Fatalf("dependency defaults = enabled:%v port:%d", options.DependencyProxy, options.ProxyPort)
+	}
+}
+
+func TestParseExposeDependencyProxyOptionsAndOptOut(t *testing.T) {
+	t.Parallel()
+	options, err := ParseExpose([]string{
+		"--name", "demo", "--http", "8080", "--proxy-port", "9000",
+		"--passthrough-host", "Auth.Company.com", "--dependency-proxy=false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.DependencyProxy || options.ProxyPort != 9000 || !reflect.DeepEqual(options.PassthroughHosts, []string{"auth.company.com"}) {
+		t.Fatalf("options = %#v", options)
+	}
+	if _, err := ParseExpose([]string{"--name", "demo", "--http", "8080", "--proxy-port", "8080"}); err == nil {
+		t.Fatal("enabled dependency proxy accepted the application port")
+	}
+	if _, err := ParseExpose([]string{"--name", "demo", "--http", "8080", "--passthrough-host", "*.example.com"}); err == nil {
+		t.Fatal("invalid expose passthrough host was accepted")
 	}
 }
 

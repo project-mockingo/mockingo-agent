@@ -32,33 +32,63 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 	_, portText, _ := net.SplitHostPort(local.Listener.Addr().String())
 	var port int
 	_, _ = fmt.Sscanf(portText, "%d", &port)
+	proxyReservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, proxyPortText, _ := net.SplitHostPort(proxyReservation.Addr().String())
+	_ = proxyReservation.Close()
+	var proxyPort int
+	_, _ = fmt.Sscanf(proxyPortText, "%d", &proxyPort)
 
 	connected := make(chan struct{}, 1)
-	var gatewayAuthorization atomic.Value
+	captureConnected := make(chan struct{}, 1)
+	var tunnelAuthorization atomic.Value
+	var captureAuthorization atomic.Value
+	endpointID := "a68c2994-75f8-4f47-a099-ccec9a52a738"
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	gatewayServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gatewayAuthorization.Store(r.Header.Get("Authorization"))
-		if r.URL.RawQuery != "" || r.URL.Path != "/v1/connect" {
+		if r.URL.RawQuery != "" {
 			t.Errorf("gateway URL = %s", r.URL.String())
 		}
-		ws, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		if err := ws.WriteJSON(tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeRequest, RequestID: "probe-1", Method: http.MethodGet, Path: "/probe"}); err != nil {
-			t.Errorf("send tunnel request: %v", err)
+		switch r.URL.Path {
+		case "/v1/connect":
+			tunnelAuthorization.Store(r.Header.Get("Authorization"))
+			ws, upgradeErr := upgrader.Upgrade(w, r, nil)
+			if upgradeErr != nil {
+				return
+			}
+			if writeErr := ws.WriteJSON(tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeRequest, RequestID: "probe-1", Method: http.MethodGet, Path: "/probe"}); writeErr != nil {
+				t.Errorf("send tunnel request: %v", writeErr)
+				_ = ws.Close()
+				return
+			}
+			var response tunnelprotocol.Message
+			if readErr := ws.ReadJSON(&response); readErr != nil || response.Type != tunnelprotocol.TypeResponse || response.RequestID != "probe-1" || response.Status != http.StatusNoContent {
+				t.Errorf("tunnel response = %#v, %v", response, readErr)
+				_ = ws.Close()
+				return
+			}
+			connected <- struct{}{}
+			_, _, _ = ws.ReadMessage()
 			_ = ws.Close()
-			return
-		}
-		var response tunnelprotocol.Message
-		if err := ws.ReadJSON(&response); err != nil || response.Type != tunnelprotocol.TypeResponse || response.RequestID != "probe-1" || response.Status != http.StatusNoContent {
-			t.Errorf("tunnel response = %#v, %v", response, err)
+		case "/v1/dependency-capture/connect":
+			captureAuthorization.Store(r.Header.Get("Authorization"))
+			ws, upgradeErr := upgrader.Upgrade(w, r, nil)
+			if upgradeErr != nil {
+				return
+			}
+			_ = ws.WriteJSON(tunnelprotocol.Message{
+				Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeDependencyConfig,
+				DependencyConfig: &tunnelprotocol.DependencyBehaviorSnapshot{EndpointID: endpointID, Behaviors: []tunnelprotocol.DependencyBehavior{}},
+			})
+			captureConnected <- struct{}{}
+			_, _, _ = ws.ReadMessage()
 			_ = ws.Close()
-			return
+		default:
+			t.Errorf("gateway URL = %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
 		}
-		connected <- struct{}{}
-		_, _, _ = ws.ReadMessage()
-		_ = ws.Close()
 	}))
 	defer gatewayServer.Close()
 
@@ -73,6 +103,7 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 	defer issuer.Close()
 
 	var sessionRequests atomic.Int32
+	var captureSessionRequests atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer oauth-access" {
 			t.Errorf("backend authorization = %q", r.Header.Get("Authorization"))
@@ -89,8 +120,19 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"endpoint": map[string]any{"id": "endpoint-1", "name": "spring-demo", "hostname": "spring-demo.mockingo.click", "publicUrl": "https://spring-demo.mockingo.click"},
-				"tunnel":   map[string]any{"sessionId": "session-1", "connectUrl": strings.Replace(gatewayServer.URL, "http://", "ws://", 1) + "/v1/connect", "ticket": "gateway-ticket", "expiresAt": time.Now().Add(time.Minute).UTC(), "protocolVersion": 1},
+				"endpoint": map[string]any{"id": endpointID, "name": "spring-demo", "hostname": "spring-demo.mockingo.click", "publicUrl": "https://spring-demo.mockingo.click"},
+				"tunnel":   map[string]any{"sessionId": "19994344-267b-4fc2-953e-c859751bae97", "connectUrl": strings.Replace(gatewayServer.URL, "http://", "ws://", 1) + "/v1/connect", "ticket": "gateway-ticket", "expiresAt": time.Now().Add(time.Minute).UTC(), "protocolVersion": 1},
+			})
+		case "/api/v1/endpoints/spring-demo/dependency-capture-sessions":
+			captureSessionRequests.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"endpoint": map[string]any{"id": endpointID, "name": "spring-demo"},
+				"capture": map[string]any{
+					"sessionId":  "8af1b4e2-7573-4467-a82d-c69cba5aaebd",
+					"connectUrl": strings.Replace(gatewayServer.URL, "http://", "ws://", 1) + "/v1/dependency-capture/connect",
+					"ticket":     "dependency-ticket", "expiresAt": time.Now().Add(time.Minute).UTC(), "protocolVersion": 1,
+				},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -110,29 +152,38 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- app.Run(ctx, []string{"expose", "--name", "spring-demo", "--http", fmt.Sprint(port), "--expected-gateway-host", "127.0.0.1", "--allow-insecure-gateway", "--reconnect=false"})
+		done <- app.Run(ctx, []string{"expose", "--name", "spring-demo", "--http", fmt.Sprint(port), "--proxy-port", fmt.Sprint(proxyPort), "--expected-gateway-host", "127.0.0.1", "--allow-insecure-gateway", "--reconnect=false"})
 	}()
 	select {
 	case <-connected:
-		cancel()
 	case <-time.After(3 * time.Second):
 		cancel()
 		t.Fatalf("expose did not connect: %s", output.String())
 	}
+	select {
+	case <-captureConnected:
+		cancel()
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatalf("dependency capture did not connect: %s", output.String())
+	}
 	if code := <-done; code != 0 {
 		t.Fatalf("exit code = %d: %s", code, output.String())
 	}
-	if sessionRequests.Load() != 1 || gatewayAuthorization.Load() != "Bearer gateway-ticket" {
-		t.Fatalf("session requests = %d, gateway auth = %v", sessionRequests.Load(), gatewayAuthorization.Load())
+	if sessionRequests.Load() != 1 || captureSessionRequests.Load() != 1 || tunnelAuthorization.Load() != "Bearer gateway-ticket" || captureAuthorization.Load() != "Bearer dependency-ticket" {
+		t.Fatalf("session requests = %d/%d, gateway auth = %v/%v", sessionRequests.Load(), captureSessionRequests.Load(), tunnelAuthorization.Load(), captureAuthorization.Load())
 	}
 	text := output.String()
-	for _, secret := range []string{"oauth-access", "oauth-refresh", "gateway-ticket"} {
+	for _, secret := range []string{"oauth-access", "oauth-refresh", "gateway-ticket", "dependency-ticket"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("output leaked %q: %s", secret, text)
 		}
 	}
 	if !strings.Contains(text, "https://spring-demo.mockingo.click") {
 		t.Fatalf("public URL missing: %s", text)
+	}
+	if !strings.Contains(text, fmt.Sprintf("Proxy          http://127.0.0.1:%d", proxyPort)) || !strings.Contains(text, "Dependency replay configuration loaded: 0 active.") {
+		t.Fatalf("dependency proxy output missing: %s", text)
 	}
 }
 

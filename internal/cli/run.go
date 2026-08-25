@@ -15,12 +15,10 @@ import (
 	"github.com/project-mockingo/mockingo-agent/internal/agent"
 	"github.com/project-mockingo/mockingo-agent/internal/apiclient"
 	"github.com/project-mockingo/mockingo-agent/internal/config"
-	"github.com/project-mockingo/mockingo-agent/internal/dependencycapture"
 	"github.com/project-mockingo/mockingo-agent/internal/naming"
 	"github.com/project-mockingo/mockingo-agent/internal/oauth"
 	"github.com/project-mockingo/mockingo-agent/internal/process"
 	"github.com/project-mockingo/mockingo-agent/internal/readiness"
-	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
 type App struct {
@@ -79,7 +77,8 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "  mockingo capture --name NAME [--proxy-port PORT] [--passthrough-host HOST]")
-	fmt.Fprintln(a.Stdout, "\nLogin uses Clerk OAuth Authorization Code Flow with PKCE.")
+	fmt.Fprintln(a.Stdout, "\nExpose includes dependency capture and replay by default; use --dependency-proxy=false to opt out.")
+	fmt.Fprintln(a.Stdout, "Login uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
 
 func (a *App) capture(ctx context.Context, args []string) (int, error) {
@@ -131,103 +130,28 @@ func (a *App) capture(ctx context.Context, args []string) (int, error) {
 		return 1, err
 	}
 	fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
-	ca, certificatePath, err := dependencycapture.LoadOrCreateCA("")
-	if err != nil {
-		return 1, fmt.Errorf("cannot prepare HTTPS inspection CA: %w", err)
-	}
-	validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
-	createSession := func(sessionCtx context.Context) (dependencycapture.CaptureSession, error) {
-		response, createErr := controlClient.CreateDependencyCaptureSession(sessionCtx, options.Name, validation)
-		if createErr != nil {
-			return dependencycapture.CaptureSession{}, mapCaptureSessionError(options.Name, createErr)
-		}
-		return dependencycapture.CaptureSession{
-			EndpointID: response.Endpoint.ID, EndpointName: response.Endpoint.Name,
-			SessionID: response.Capture.SessionID, ConnectURL: response.Capture.ConnectURL,
-			Ticket: response.Capture.Ticket,
-		}, nil
-	}
-	initial, err := createSession(ctx)
-	if err != nil {
-		return 1, err
-	}
-	behaviors := dependencycapture.NewBehaviorStore()
-	uploader := dependencycapture.NewUploader(dependencycapture.UploaderConfig{
-		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable,
-		QueueSize: 100, ReconnectInitialDelay: options.ReconnectInitialDelay,
-		ReconnectMaxDelay: options.ReconnectMaxDelay,
-		OnState:           func(message string) { fmt.Fprintln(a.Stdout, message) },
-		OnDrop: func() {
-			fmt.Fprintln(a.Stderr, "Warning: dependency capture telemetry was dropped; proxy forwarding is unaffected.")
-		},
-		OnConfig: func(snapshot tunnelprotocol.DependencyBehaviorSnapshot) error {
-			if err := behaviors.Replace(snapshot); err != nil {
-				return err
-			}
-			for _, behavior := range snapshot.Behaviors {
-				for _, passthrough := range options.PassthroughHosts {
-					if strings.EqualFold(strings.TrimSuffix(behavior.Host, "."), strings.TrimSuffix(passthrough, ".")) {
-						fmt.Fprintf(a.Stderr, "Warning: dependency replay %s is inactive because %s is configured for HTTPS passthrough.\n", behavior.ID, behavior.Host)
-					}
-				}
-			}
-			fmt.Fprintf(a.Stdout, "Dependency replay configuration loaded: %d active.\n", len(snapshot.Behaviors))
-			return nil
-		},
-	})
-	var verbose func(string, ...any)
-	if options.Verbose {
-		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
-	}
-	proxy, err := dependencycapture.NewProxy(dependencycapture.ProxyConfig{
-		Port: options.ProxyPort, CA: ca, PassthroughHosts: options.PassthroughHosts,
-		Behaviors: behaviors, Emit: uploader.Enqueue, Verbose: verbose,
-		OnCompleted: func(event tunnelprotocol.DependencyInteraction) {
-			fmt.Fprintf(a.Stdout, "%s %s://%s%s %d %dms\n", event.Request.Method, event.Scheme, event.Host, event.Request.Path, event.Response.Status, event.DurationMS)
-		},
+	runtime, err := a.startDependencyRuntime(ctx, controlClient, dependencyRuntimeOptions{
+		Name: options.Name, ProxyPort: options.ProxyPort, PassthroughHosts: options.PassthroughHosts,
+		ExpectedGatewayHost:   options.ExpectedGatewayHost,
+		ReconnectInitialDelay: options.ReconnectInitialDelay, ReconnectMaxDelay: options.ReconnectMaxDelay,
+		AllowInsecureGateway: options.AllowInsecureGateway, Verbose: options.Verbose,
+		RequireInitialSession: true,
 	})
 	if err != nil {
 		return 1, err
 	}
-	listener, err := proxy.Listen()
-	if err != nil {
-		return 1, fmt.Errorf("cannot start dependency proxy on 127.0.0.1:%d: the port may already be in use; use --proxy-port to choose another port: %w", options.ProxyPort, err)
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer proxy.CloseIdleConnections()
-	proxyDone := make(chan error, 1)
-	uploadDone := make(chan error, 1)
-	go func() { proxyDone <- proxy.Serve(runCtx, listener) }()
-	go func() { uploadDone <- uploader.Run(runCtx) }()
-	fmt.Fprintf(a.Stdout, "\nDependency proxy started\n\nEndpoint       %s\nProxy          http://127.0.0.1:%d\nHTTPS          inspection enabled (HTTP/1.1)\nCA certificate %s\nReplays        %d active (waiting for cloud snapshot)\n\nConfigure your application manually to use this proxy.\nTrust the CA certificate in the application runtime for HTTPS.\n\nWaiting for dependency traffic...\n\nPress Ctrl+C to stop.\n", options.Name, options.ProxyPort, certificatePath, behaviors.Count())
-	for {
-		select {
-		case err := <-proxyDone:
-			cancel()
-			if uploadDone != nil {
-				<-uploadDone
-			}
-			if err != nil {
-				return 1, fmt.Errorf("dependency proxy stopped: %w", err)
-			}
-			return 0, nil
-		case err := <-uploadDone:
-			uploadDone = nil
-			if err != nil {
-				fmt.Fprintf(a.Stderr, "Warning: dependency capture upload stopped: %v. Proxy forwarding continues.\n", err)
-			} else {
-				fmt.Fprintln(a.Stderr, "Warning: dependency capture upload stopped. Proxy forwarding continues.")
-			}
-		case <-ctx.Done():
-			cancel()
-			<-proxyDone
-			if uploadDone != nil {
-				<-uploadDone
-			}
-			fmt.Fprintln(a.Stdout, "Dependency capture stopped.")
-			return 0, nil
+	defer runtime.Close()
+	runtime.printStarted(a.Stdout, options.Name)
+	fmt.Fprintln(a.Stdout, "\nWaiting for dependency traffic...\n\nPress Ctrl+C to stop.")
+	select {
+	case <-runtime.ProxyDone():
+		if err := runtime.ProxyError(); err != nil {
+			return 1, fmt.Errorf("dependency proxy stopped: %w", err)
 		}
+		return 0, nil
+	case <-ctx.Done():
+		fmt.Fprintln(a.Stdout, "Dependency capture stopped.")
+		return 0, nil
 	}
 }
 
@@ -317,6 +241,28 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var dependencies *dependencyRuntime
+	var dependencyDone <-chan struct{}
+	if options.DependencyProxy {
+		dependencies, err = a.startDependencyRuntime(runCtx, controlClient, dependencyRuntimeOptions{
+			Name: options.Name, ProxyPort: options.ProxyPort, PassthroughHosts: options.PassthroughHosts,
+			ExpectedGatewayHost:   options.ExpectedGatewayHost,
+			ReconnectInitialDelay: options.ReconnectInitialDelay, ReconnectMaxDelay: options.ReconnectMaxDelay,
+			AllowInsecureGateway: options.AllowInsecureGateway, Verbose: options.Verbose,
+		})
+		if err != nil {
+			return 1, err
+		}
+		defer dependencies.Close()
+		dependencies.printStarted(a.Stdout, options.Name)
+		dependencyDone = dependencies.ProxyDone()
+	}
+	dependencyStopped := func() error {
+		if dependencies != nil && dependencies.ProxyError() != nil {
+			return fmt.Errorf("dependency proxy stopped: %w", dependencies.ProxyError())
+		}
+		return errors.New("dependency proxy stopped unexpectedly")
+	}
 	var child *process.Process
 	if len(options.Command) > 0 {
 		fmt.Fprintf(a.Stdout, "Starting: %s\n", formatCommand(options.Command))
@@ -340,16 +286,32 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 
 	fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", options.HTTPPort)
 	startupCtx, startupCancel := context.WithTimeout(runCtx, options.StartupTimeout)
+	defer startupCancel()
 	ready := make(chan error, 1)
 	go func() { ready <- readiness.Wait(startupCtx, options.HTTPPort) }()
 	if child == nil {
-		err = <-ready
+		select {
+		case err = <-ready:
+		case <-dependencyDone:
+			if runCtx.Err() != nil {
+				return 0, nil
+			}
+			return 1, dependencyStopped()
+		case <-runCtx.Done():
+			return 0, nil
+		}
 	} else {
 		select {
 		case err = <-ready:
 		case result := <-child.Done():
 			startupCancel()
 			return exitCode(result), fmt.Errorf("process startup failure: process exited before port became ready")
+		case <-dependencyDone:
+			startupCancel()
+			if runCtx.Err() != nil {
+				return 0, nil
+			}
+			return 1, dependencyStopped()
 		case <-runCtx.Done():
 			startupCancel()
 			return 0, nil
@@ -418,6 +380,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 				return 0, nil
 			}
 			return 1, fmt.Errorf("tunnel connection failure: %w", err)
+		case <-dependencyDone:
+			if runCtx.Err() != nil {
+				return 0, nil
+			}
+			return 1, dependencyStopped()
 		case <-runCtx.Done():
 			return 0, nil
 		}
@@ -435,6 +402,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 				return 0, nil
 			}
 			return 1, fmt.Errorf("tunnel connection failure: %w", err)
+		case <-dependencyDone:
+			if runCtx.Err() != nil {
+				return 0, nil
+			}
+			return 1, dependencyStopped()
 		case <-runCtx.Done():
 			return 0, nil
 		}
@@ -447,6 +419,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 				return 0, nil
 			}
 			return 1, fmt.Errorf("tunnel connection failure: %w", err)
+		case <-dependencyDone:
+			if runCtx.Err() != nil {
+				return 0, nil
+			}
+			return 1, dependencyStopped()
 		case <-runCtx.Done():
 			return 0, nil
 		}
@@ -463,6 +440,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 			return 0, nil
 		}
 		return 1, fmt.Errorf("tunnel connection failure: %w", err)
+	case <-dependencyDone:
+		if runCtx.Err() != nil {
+			return 0, nil
+		}
+		return 1, dependencyStopped()
 	case <-runCtx.Done():
 		return 0, nil
 	}
@@ -471,7 +453,9 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 func (a *App) exposeUsage() {
 	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "")
+	fmt.Fprintln(a.Stdout, "Starts the public tunnel and the local dependency capture/replay proxy by default.")
 	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")
+	fmt.Fprintln(a.Stdout, "Dependency options: --dependency-proxy, --proxy-port, --passthrough-host (repeatable). Use --dependency-proxy=false to opt out.")
 	fmt.Fprintln(a.Stdout, "Options: --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
 }
 

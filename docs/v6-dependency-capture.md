@@ -11,8 +11,13 @@ the V6 baseline. V7 adds local replay through the same proxy; see
 1. Sign in and start a session:
 
    ```bash
-   mockingo capture --name integration
+   mockingo expose --name integration --http 8080
    ```
+
+   This starts both the public tunnel and dependency proxy. Use
+   `mockingo capture --name integration` when only dependency capture/replay is
+   needed, including for a Virtual endpoint. Use `--dependency-proxy=false` on
+   `expose` to disable the default proxy.
 
 2. Configure the application manually to use the printed proxy for both HTTP
    and HTTPS (by default `http://127.0.0.1:8899`).
@@ -31,8 +36,10 @@ configuration is:
 -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=8899
 ```
 
-Mockingo does not inject these options, launch the application, or modify Java,
-Node.js, Python, .NET, WSO2, OS, browser, or trust-store configuration.
+Mockingo does not inject these options or modify Java, Node.js, Python, .NET,
+WSO2, OS, browser, or trust-store configuration. `expose` can launch only the
+explicit command supplied after `--`; that child still requires manual proxy
+and CA configuration.
 
 ## HTTPS and passthrough
 
@@ -44,7 +51,7 @@ Certificate-pinned applications and mTLS are not interceptable in V6. Tunnel
 those exact hosts without decryption:
 
 ```bash
-mockingo capture --name integration \
+mockingo expose --name integration --http 8080 \
   --passthrough-host auth.company.com \
   --passthrough-host secure.partner.com
 ```
@@ -56,8 +63,10 @@ request/response data.
 
 Request and response bodies stream to their real destinations. Textual capture
 copies are bounded to 256 KiB and 512 KiB respectively; exceeding a limit marks
-only the preview as truncated. Binary, multipart, and encoded/compressed body
-previews remain unavailable without changing the traffic.
+only the preview as truncated. Textual gzip, deflate, and Brotli bodies are
+decoded only for this bounded copy while the application receives the original
+encoded stream. Binary, multipart, unsupported encodings, and oversized
+encoded bodies remain metadata-only.
 
 Before an event leaves the machine, the Agent redacts Authorization,
 Proxy-Authorization, Cookie, Set-Cookie, and common secret query parameters.

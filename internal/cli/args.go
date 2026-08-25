@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,9 @@ func (f *envFlags) Set(value string) error {
 type ExposeOptions struct {
 	Name                  string
 	HTTPPort              int
+	DependencyProxy       bool
+	ProxyPort             int
+	PassthroughHosts      []string
 	CWD                   string
 	Environment           map[string]string
 	StartupTimeout        time.Duration
@@ -117,19 +121,28 @@ func ParseCapture(args []string) (CaptureOptions, error) {
 	if strings.TrimSpace(options.ExpectedGatewayHost) == "" {
 		return CaptureOptions{}, errors.New("--expected-gateway-host is required")
 	}
+	options.PassthroughHosts, err = normalizePassthroughHosts(passthrough)
+	if err != nil {
+		return CaptureOptions{}, err
+	}
+	return options, nil
+}
+
+func normalizePassthroughHosts(values []string) ([]string, error) {
 	seen := make(map[string]struct{})
-	for _, host := range passthrough {
+	for _, host := range values {
 		host = strings.ToLower(strings.TrimSuffix(host, "."))
 		if net.ParseIP(host) == nil && !validProxyHost(host) {
-			return CaptureOptions{}, fmt.Errorf("invalid --passthrough-host %q", host)
+			return nil, fmt.Errorf("invalid --passthrough-host %q", host)
 		}
 		seen[host] = struct{}{}
 	}
-	options.PassthroughHosts = make([]string, 0, len(seen))
+	result := make([]string, 0, len(seen))
 	for host := range seen {
-		options.PassthroughHosts = append(options.PassthroughHosts, host)
+		result = append(result, host)
 	}
-	return options, nil
+	sort.Strings(result)
+	return result, nil
 }
 
 func validProxyHost(host string) bool {
@@ -176,11 +189,16 @@ func ParseEnvironment(values []string) (map[string]string, error) {
 func ParseExpose(args []string) (ExposeOptions, error) {
 	var options ExposeOptions
 	var env envFlags
+	var passthrough stringFlags
 	protocolVersion, err := envInt("MOCKINGO_TUNNEL_PROTOCOL_VERSION", tunnelprotocol.Version)
 	if err != nil {
 		return ExposeOptions{}, err
 	}
 	reconnectEnabled, err := envBool("MOCKINGO_RECONNECT_ENABLED", true)
+	if err != nil {
+		return ExposeOptions{}, err
+	}
+	dependencyProxy, err := envBool("MOCKINGO_DEPENDENCY_PROXY_ENABLED", true)
 	if err != nil {
 		return ExposeOptions{}, err
 	}
@@ -202,6 +220,7 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	}
 	options.ProtocolVersion = protocolVersion
 	options.ReconnectEnabled = reconnectEnabled
+	options.DependencyProxy = dependencyProxy
 	options.AllowInsecureGateway = allowInsecure
 	options.AllowFileCredentials = allowFile
 	options.ReconnectInitialDelay = initialDelay
@@ -210,6 +229,9 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	set.SetOutput(new(strings.Builder))
 	set.StringVar(&options.Name, "name", "", "tunnel name")
 	set.IntVar(&options.HTTPPort, "http", 0, "local HTTP port")
+	set.BoolVar(&options.DependencyProxy, "dependency-proxy", options.DependencyProxy, "run dependency capture and replay proxy")
+	set.IntVar(&options.ProxyPort, "proxy-port", 8899, "loopback dependency proxy port")
+	set.Var(&passthrough, "passthrough-host", "exact HTTPS hostname to tunnel without inspection")
 	set.StringVar(&options.CWD, "cwd", "", "child working directory")
 	set.Var(&env, "env", "child environment KEY=VALUE")
 	set.DurationVar(&options.StartupTimeout, "startup-timeout", 60*time.Second, "startup timeout")
@@ -232,6 +254,12 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	if options.HTTPPort < 1 || options.HTTPPort > 65535 {
 		return ExposeOptions{}, errors.New("--http must be a port between 1 and 65535")
 	}
+	if options.ProxyPort < 1 || options.ProxyPort > 65535 {
+		return ExposeOptions{}, errors.New("--proxy-port must be between 1 and 65535")
+	}
+	if options.DependencyProxy && options.ProxyPort == options.HTTPPort {
+		return ExposeOptions{}, errors.New("--proxy-port must differ from --http when the dependency proxy is enabled")
+	}
 	if options.StartupTimeout <= 0 || options.RequestTimeout <= 0 {
 		return ExposeOptions{}, errors.New("timeouts must be greater than zero")
 	}
@@ -249,6 +277,10 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 		return ExposeOptions{}, err
 	}
 	options.Environment = parsedEnv
+	options.PassthroughHosts, err = normalizePassthroughHosts(passthrough)
+	if err != nil {
+		return ExposeOptions{}, err
+	}
 	options.Command = append([]string(nil), set.Args()...)
 	return options, nil
 }
