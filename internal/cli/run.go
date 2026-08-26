@@ -49,8 +49,6 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.logout(ctx, args[1:])
 	case "expose":
 		code, err = a.expose(ctx, args[1:])
-	case "capture":
-		code, err = a.capture(ctx, args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -76,89 +74,8 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
 	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
-	fmt.Fprintln(a.Stdout, "  mockingo capture --name NAME [--proxy-port PORT] [--passthrough-host HOST]")
 	fmt.Fprintln(a.Stdout, "\nExpose includes dependency capture and replay by default; use --dependency-proxy=false to opt out.")
 	fmt.Fprintln(a.Stdout, "Login uses Clerk OAuth Authorization Code Flow with PKCE.")
-}
-
-func (a *App) capture(ctx context.Context, args []string) (int, error) {
-	for _, arg := range args {
-		if arg == "--help" || arg == "-h" {
-			a.captureUsage()
-			return 0, nil
-		}
-	}
-	options, err := ParseCapture(args)
-	if err != nil {
-		return 2, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if err := naming.Validate(options.Name); err != nil {
-		return 2, fmt.Errorf("invalid arguments: %w", err)
-	}
-	path, err := a.path()
-	if err != nil {
-		return 1, fmt.Errorf("configuration error: %w", err)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		if errors.Is(err, config.ErrNotConfigured) {
-			return 1, apiclient.ErrNotSignedIn
-		}
-		return 1, fmt.Errorf("configuration error: %w", err)
-	}
-	if cfg.OAuthIssuer == "" || cfg.OAuthClientID == "" || cfg.APIURL == "" {
-		return 1, apiclient.ErrNotSignedIn
-	}
-	metadata, err := oauth.Discover(ctx, a.httpClient(), cfg.OAuthIssuer)
-	if err != nil {
-		return 1, err
-	}
-	apiURL := cfg.APIURL
-	if options.APIURL != "" {
-		apiURL, err = validateAPIURL(options.APIURL)
-		if err != nil {
-			return 2, fmt.Errorf("invalid arguments: %w", err)
-		}
-	}
-	controlClient := &apiclient.Client{
-		HTTP: a.httpClient(), APIURL: apiURL, Issuer: cfg.OAuthIssuer,
-		ClientID: cfg.OAuthClientID, Scopes: strings.Fields(cfg.OAuthScopes), Metadata: metadata,
-		Store: a.credentialStore(path, options.AllowFileCredentials),
-	}
-	identity, err := controlClient.Me(ctx)
-	if err != nil {
-		return 1, err
-	}
-	fmt.Fprintf(a.Stdout, "✓ Signed in as %s\n", identity.UserID)
-	runtime, err := a.startDependencyRuntime(ctx, controlClient, dependencyRuntimeOptions{
-		Name: options.Name, ProxyPort: options.ProxyPort, PassthroughHosts: options.PassthroughHosts,
-		ExpectedGatewayHost:   options.ExpectedGatewayHost,
-		ReconnectInitialDelay: options.ReconnectInitialDelay, ReconnectMaxDelay: options.ReconnectMaxDelay,
-		AllowInsecureGateway: options.AllowInsecureGateway, Verbose: options.Verbose,
-		RequireInitialSession: true,
-	})
-	if err != nil {
-		return 1, err
-	}
-	defer runtime.Close()
-	runtime.printStarted(a.Stdout, options.Name)
-	fmt.Fprintln(a.Stdout, "\nWaiting for dependency traffic...\n\nPress Ctrl+C to stop.")
-	select {
-	case <-runtime.ProxyDone():
-		if err := runtime.ProxyError(); err != nil {
-			return 1, fmt.Errorf("dependency proxy stopped: %w", err)
-		}
-		return 0, nil
-	case <-ctx.Done():
-		fmt.Fprintln(a.Stdout, "Dependency capture stopped.")
-		return 0, nil
-	}
-}
-
-func (a *App) captureUsage() {
-	fmt.Fprintln(a.Stdout, "Usage: mockingo capture --name NAME [options]")
-	fmt.Fprintln(a.Stdout, "")
-	fmt.Fprintln(a.Stdout, "Options: --proxy-port, --passthrough-host (repeatable), --api-url, --expected-gateway-host, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --verbose")
 }
 
 func mapCaptureSessionError(name string, err error) error {
@@ -245,7 +162,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	var dependencyDone <-chan struct{}
 	if options.DependencyProxy {
 		dependencies, err = a.startDependencyRuntime(runCtx, controlClient, dependencyRuntimeOptions{
-			Name: options.Name, ProxyPort: options.ProxyPort, PassthroughHosts: options.PassthroughHosts,
+			Name: options.Name, ProxyBind: options.ProxyBind, ProxyPort: options.ProxyPort, PassthroughHosts: options.PassthroughHosts,
 			ExpectedGatewayHost:   options.ExpectedGatewayHost,
 			ReconnectInitialDelay: options.ReconnectInitialDelay, ReconnectMaxDelay: options.ReconnectMaxDelay,
 			AllowInsecureGateway: options.AllowInsecureGateway, Verbose: options.Verbose,
@@ -254,7 +171,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 			return 1, err
 		}
 		defer dependencies.Close()
-		dependencies.printStarted(a.Stdout, options.Name)
+		dependencies.printStarted(a.Stdout, a.Stderr, options.Name)
 		dependencyDone = dependencies.ProxyDone()
 	}
 	dependencyStopped := func() error {
@@ -455,7 +372,7 @@ func (a *App) exposeUsage() {
 	fmt.Fprintln(a.Stdout, "")
 	fmt.Fprintln(a.Stdout, "Starts the public tunnel and the local dependency capture/replay proxy by default.")
 	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")
-	fmt.Fprintln(a.Stdout, "Dependency options: --dependency-proxy, --proxy-port, --passthrough-host (repeatable). Use --dependency-proxy=false to opt out.")
+	fmt.Fprintln(a.Stdout, "Dependency options: --dependency-proxy, --proxy-bind, --proxy-port, --passthrough-host (repeatable). Use --dependency-proxy=false to opt out.")
 	fmt.Fprintln(a.Stdout, "Options: --api-url, --expected-gateway-host, --tunnel-protocol-version, --reconnect, --reconnect-initial-delay, --reconnect-max-delay, --allow-insecure-gateway, --allow-insecure-storage, --cwd, --env, --startup-timeout, --request-timeout, --verbose")
 }
 

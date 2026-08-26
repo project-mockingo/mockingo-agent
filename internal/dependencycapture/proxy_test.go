@@ -194,7 +194,7 @@ func TestOfflineHTTPReplayConsumesBodyAndNeverDialsOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := make(chan tunnelprotocol.DependencyInteraction, 1)
-	client, stop := testProxyClient(t, ProxyConfig{Behaviors: store, Emit: func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true }}, nil)
+	client, stop := testProxyClient(t, ProxyConfig{BindAddress: "0.0.0.0", Behaviors: store, Emit: func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true }}, nil)
 	defer stop()
 	requestBody := bytes.Repeat([]byte("request-body"), 1024)
 	request, _ := http.NewRequest(http.MethodPost, "http://unavailable-target.test:12345/hello?ignored=yes", bytes.NewReader(requestBody))
@@ -212,7 +212,7 @@ func TestOfflineHTTPReplayConsumesBodyAndNeverDialsOrigin(t *testing.T) {
 		t.Fatalf("unsafe replay headers leaked: %v", response.Header)
 	}
 	event := <-events
-	if event.HandledBy != "REPLAY" || event.Request.SizeBytes != int64(len(requestBody)) || event.Request.RawQuery != "ignored=yes" {
+	if event.HandledBy != "REPLAY" || event.Host != "unavailable-target.test" || event.Port != 12345 || event.Request.SizeBytes != int64(len(requestBody)) || event.Request.RawQuery != "ignored=yes" {
 		t.Fatalf("replay event = %+v", event)
 	}
 }
@@ -222,7 +222,7 @@ func TestOfflineHTTPSReplayDoesNotContactOrigin(t *testing.T) {
 	if err := store.Replace(testBehaviorSnapshot("https", "unavailable-target.test", 443, "GET", "/secure")); err != nil {
 		t.Fatal(err)
 	}
-	client, stop := testProxyClient(t, ProxyConfig{Behaviors: store}, nil)
+	client, stop := testProxyClient(t, ProxyConfig{BindAddress: "0.0.0.0", Behaviors: store}, nil)
 	defer stop()
 	response, err := client.Get("https://unavailable-target.test/secure")
 	if err != nil {
@@ -283,7 +283,7 @@ func TestHTTPSInterceptionUsesCaptureCAAndValidatesUpstream(t *testing.T) {
 	upstreamRoots := x509.NewCertPool()
 	upstreamRoots.AddCert(backend.Certificate())
 	events := make(chan tunnelprotocol.DependencyInteraction, 1)
-	client, stop := testProxyClient(t, ProxyConfig{UpstreamRootCAs: upstreamRoots, Emit: func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true }}, nil)
+	client, stop := testProxyClient(t, ProxyConfig{BindAddress: "0.0.0.0", UpstreamRootCAs: upstreamRoots, Emit: func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true }}, nil)
 	defer stop()
 	response, err := client.Get(backend.URL + "/secure")
 	if err != nil {
@@ -312,7 +312,7 @@ func TestHTTPSPassthroughPreservesBackendIdentityAndEmitsNoHTTPEvent(t *testing.
 		t.Fatal(err)
 	}
 	var emitted atomic.Int32
-	client, stop := testProxyClient(t, ProxyConfig{PassthroughHosts: []string{"127.0.0.1"}, Behaviors: store, Emit: func(tunnelprotocol.DependencyInteraction) bool { emitted.Add(1); return true }}, backendRoots)
+	client, stop := testProxyClient(t, ProxyConfig{BindAddress: "0.0.0.0", PassthroughHosts: []string{"127.0.0.1"}, Behaviors: store, Emit: func(tunnelprotocol.DependencyInteraction) bool { emitted.Add(1); return true }}, backendRoots)
 	defer stop()
 	response, err := client.Get(backend.URL)
 	if err != nil {
@@ -542,6 +542,80 @@ func TestProxyReportsPortConflict(t *testing.T) {
 	}
 }
 
+func TestProxyDefaultBindIsLoopback(t *testing.T) {
+	ca, _, err := LoadOrCreateCA(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := NewProxy(ProxyConfig{Port: 0, CA: ca})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := proxy.Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	host, _, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
+		t.Fatalf("default listener = %q, want loopback: %v", listener.Addr(), err)
+	}
+}
+
+func TestProxyBindValidation(t *testing.T) {
+	ca, _, err := LoadOrCreateCA(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bind := range []string{"127.0.0.1", "0.0.0.0", "192.168.1.25", "::1", "::"} {
+		if _, err := NewProxy(ProxyConfig{BindAddress: bind, Port: 0, CA: ca}); err != nil {
+			t.Fatalf("bind %q rejected: %v", bind, err)
+		}
+	}
+	for _, bind := range []string{"999.999.999.999", "127.0.0.1:8899", "not an address"} {
+		if _, err := NewProxy(ProxyConfig{BindAddress: bind, Port: 0, CA: ca}); err == nil {
+			t.Fatalf("invalid bind %q accepted", bind)
+		}
+	}
+}
+
+func TestNonLoopbackBindForwardsAndCapturesRealTarget(t *testing.T) {
+	backendRequests := make(chan *http.Request, 1)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendRequests <- r.Clone(context.Background())
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("from origin"))
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL)
+	wantHost, wantPort, err := targetHostPort(target.Host, "http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan tunnelprotocol.DependencyInteraction, 1)
+	client, stop := testProxyClient(t, ProxyConfig{
+		BindAddress: "0.0.0.0",
+		Emit:        func(event tunnelprotocol.DependencyInteraction) bool { events <- event; return true },
+	}, nil)
+	defer stop()
+	response, err := client.Get(backend.URL + "/docker-check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted || string(body) != "from origin" {
+		t.Fatalf("response status=%d body=%q", response.StatusCode, body)
+	}
+	if request := <-backendRequests; request.URL.Path != "/docker-check" {
+		t.Fatalf("backend path = %q", request.URL.Path)
+	}
+	event := <-events
+	if event.Scheme != "http" || event.Host != wantHost || event.Port != wantPort || event.Request.Path != "/docker-check" || event.Response.Status != http.StatusAccepted {
+		t.Fatalf("captured target = %+v, want http://%s:%d/docker-check", event, wantHost, wantPort)
+	}
+}
+
 func TestBinaryUnsupportedEncodedAndCompressedBodies(t *testing.T) {
 	binaryHeaders := http.Header{"Content-Type": []string{"application/octet-stream"}}
 	binary := capturedBody(binaryHeaders, []byte{0, 1, 2}, 3, 16)
@@ -599,7 +673,17 @@ func testProxyClient(t *testing.T, config ProxyConfig, clientRoots *x509.CertPoo
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- proxy.Serve(ctx, listener) }()
-	proxyURL, _ := url.Parse("http://" + listener.Addr().String())
+	proxyHost, proxyPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ip := net.ParseIP(proxyHost); ip != nil && ip.IsUnspecified() {
+		proxyHost = "127.0.0.1"
+		if ip.To4() == nil {
+			proxyHost = "::1"
+		}
+	}
+	proxyURL, _ := url.Parse("http://" + net.JoinHostPort(proxyHost, proxyPort))
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxyURL)
 	transport.ForceAttemptHTTP2 = false

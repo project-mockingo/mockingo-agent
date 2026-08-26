@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 )
 
 type ProxyConfig struct {
+	BindAddress      string
 	Port             int
 	CA               *CertificateAuthority
 	PassthroughHosts []string
@@ -41,6 +43,14 @@ type Proxy struct {
 }
 
 func NewProxy(config ProxyConfig) (*Proxy, error) {
+	if config.BindAddress == "" {
+		config.BindAddress = "127.0.0.1"
+	}
+	bindIP := net.ParseIP(config.BindAddress)
+	if bindIP == nil {
+		return nil, fmt.Errorf("invalid proxy bind address %q", config.BindAddress)
+	}
+	config.BindAddress = bindIP.String()
 	if config.Port < 0 || config.Port > 65535 {
 		return nil, errors.New("proxy port must be between 1 and 65535")
 	}
@@ -62,7 +72,11 @@ func NewProxy(config ProxyConfig) (*Proxy, error) {
 }
 
 func (p *Proxy) Listen() (net.Listener, error) {
-	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p.config.Port)))
+	network := "tcp4"
+	if net.ParseIP(p.config.BindAddress).To4() == nil {
+		network = "tcp6"
+	}
+	return net.Listen(network, net.JoinHostPort(p.config.BindAddress, strconv.Itoa(p.config.Port)))
 }
 
 func (p *Proxy) Serve(ctx context.Context, listener net.Listener) error {

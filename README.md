@@ -46,13 +46,15 @@ legacy token login/expose modes are not supported.
 
 `mockingo expose --name <endpoint> --http <port>` starts the public tunnel and,
 by default, a loopback-only explicit dependency HTTP/S proxy on
-`127.0.0.1:8899`. Use `--dependency-proxy=false` to opt out. The standalone
-`mockingo capture --name <endpoint>` command remains available for
-dependency-only and Virtual-endpoint workflows.
+`127.0.0.1:8899`. Use `--dependency-proxy=false` to opt out. To let a Docker
+Desktop container reach the proxy, opt in to a non-loopback listener with
+`--proxy-bind 0.0.0.0`, then configure the container to use
+`http://host.docker.internal:8899`. Non-loopback binding prints a security
+warning and should be used only on trusted development networks.
 
-Both commands print the proxy URL and public local CA certificate path; they
-never change application environment variables, operating-system proxy
-settings, or trust stores. See
+The command prints the proxy address and public local CA certificate path; it
+never changes application environment variables, Docker networking,
+operating-system proxy settings, or trust stores. See
 [`docs/v6-dependency-capture.md`](docs/v6-dependency-capture.md) for setup,
 security boundaries, passthrough, and HTTPS limitations. Enabled dependency
 replays are delivered over the capture session and matched locally before any

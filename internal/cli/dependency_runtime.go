@@ -16,6 +16,7 @@ import (
 
 type dependencyRuntimeOptions struct {
 	Name                  string
+	ProxyBind             string
 	ProxyPort             int
 	PassthroughHosts      []string
 	ExpectedGatewayHost   string
@@ -23,7 +24,6 @@ type dependencyRuntimeOptions struct {
 	ReconnectMaxDelay     time.Duration
 	AllowInsecureGateway  bool
 	Verbose               bool
-	RequireInitialSession bool
 }
 
 type dependencyRuntime struct {
@@ -63,18 +63,9 @@ func (a *App) startDependencyRuntime(
 			Ticket: response.Capture.Ticket,
 		}, nil
 	}
-	var initial *dependencycapture.CaptureSession
-	if options.RequireInitialSession {
-		session, createErr := createSession(parent)
-		if createErr != nil {
-			return nil, createErr
-		}
-		initial = &session
-	}
-
 	behaviors := dependencycapture.NewBehaviorStore()
 	uploader := dependencycapture.NewUploader(dependencycapture.UploaderConfig{
-		InitialSession: initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable,
+		AcquireSession: createSession, Retryable: apiclient.IsRetryable,
 		QueueSize: 100, ReconnectInitialDelay: options.ReconnectInitialDelay,
 		ReconnectMaxDelay: options.ReconnectMaxDelay,
 		OnState:           func(message string) { fmt.Fprintln(a.Stdout, message) },
@@ -101,7 +92,7 @@ func (a *App) startDependencyRuntime(
 		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
 	}
 	proxy, err := dependencycapture.NewProxy(dependencycapture.ProxyConfig{
-		Port: options.ProxyPort, CA: ca, PassthroughHosts: options.PassthroughHosts,
+		BindAddress: options.ProxyBind, Port: options.ProxyPort, CA: ca, PassthroughHosts: options.PassthroughHosts,
 		Behaviors: behaviors, Emit: uploader.Enqueue, Verbose: verbose,
 		OnCompleted: func(event tunnelprotocol.DependencyInteraction) {
 			fmt.Fprintf(a.Stdout, "%s %s://%s%s %d %dms\n", event.Request.Method, event.Scheme, event.Host, event.Request.Path, event.Response.Status, event.DurationMS)
@@ -112,11 +103,8 @@ func (a *App) startDependencyRuntime(
 	}
 	listener, err := proxy.Listen()
 	if err != nil {
-		hint := "use --proxy-port to choose another port"
-		if !options.RequireInitialSession {
-			hint += " or --dependency-proxy=false to disable it"
-		}
-		return nil, fmt.Errorf("cannot start dependency proxy on 127.0.0.1:%d: the port may already be in use; %s: %w", options.ProxyPort, hint, err)
+		address := net.JoinHostPort(options.ProxyBind, fmt.Sprint(options.ProxyPort))
+		return nil, fmt.Errorf("cannot start dependency proxy on %s: the address may already be in use; use --proxy-port to choose another port or --dependency-proxy=false to disable it: %w", address, err)
 	}
 	runCtx, cancel := context.WithCancel(parent)
 	runtime := &dependencyRuntime{
@@ -146,9 +134,37 @@ func (a *App) startDependencyRuntime(
 	return runtime, nil
 }
 
-func (r *dependencyRuntime) printStarted(output io.Writer, endpointName string) {
-	_, port, _ := net.SplitHostPort(r.proxyAddress)
-	fmt.Fprintf(output, "\nDependency proxy started\n\nEndpoint       %s\nProxy          http://127.0.0.1:%s\nHTTPS          inspection enabled (HTTP/1.1)\nCA certificate %s\nReplays        %d active (waiting for cloud snapshot)\n\nConfigure your application manually to use this proxy.\nTrust the CA certificate in the application runtime for HTTPS.\n", endpointName, port, r.certificatePath, r.behaviors.Count())
+func (r *dependencyRuntime) printStarted(output, warnings io.Writer, endpointName string) {
+	bind, port, _ := net.SplitHostPort(r.proxyAddress)
+	fmt.Fprintf(output, "\nDependency proxy started\n\nEndpoint       %s\n", endpointName)
+	if proxyBindIsLoopback(bind) {
+		fmt.Fprintf(output, "Proxy          %s\n", proxyURL(bind, port))
+	} else {
+		fmt.Fprintf(output, "Listening      %s\n", net.JoinHostPort(bind, port))
+		if ip := net.ParseIP(bind); ip != nil && ip.IsUnspecified() {
+			loopback := "127.0.0.1"
+			if ip.To4() == nil {
+				loopback = "::1"
+			}
+			fmt.Fprintf(output, "Host apps      %s\n", proxyURL(loopback, port))
+			if ip.To4() != nil {
+				fmt.Fprintf(output, "Docker Desktop http://host.docker.internal:%s\n", port)
+			}
+		} else {
+			fmt.Fprintf(output, "Client proxy   %s\n", proxyURL(bind, port))
+		}
+		fmt.Fprintln(warnings, "WARNING: Dependency proxy is listening outside localhost.\nOther processes or machines that can reach this host may be able to use the proxy.\nUse non-loopback binding only on trusted development networks.")
+	}
+	fmt.Fprintf(output, "HTTPS          inspection enabled (HTTP/1.1)\nCA certificate %s\nReplays        %d active (waiting for cloud snapshot)\n\nDependency capture/replay is active.\nConfigure your application manually to use the proxy above.\nTrust the CA certificate in the application runtime for HTTPS.\n", r.certificatePath, r.behaviors.Count())
+}
+
+func proxyURL(host, port string) string {
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+func proxyBindIsLoopback(bind string) bool {
+	ip := net.ParseIP(bind)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (r *dependencyRuntime) ProxyDone() <-chan struct{} { return r.proxyDone }

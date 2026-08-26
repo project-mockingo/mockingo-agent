@@ -7,9 +7,8 @@ in one process by default:
 mockingo expose --name integration --http 8080
 ```
 
-Use `--dependency-proxy=false` to run only the public tunnel. The existing
-`mockingo capture --name integration` command remains available when no inbound
-tunnel is needed or the endpoint is Virtual.
+Use `--dependency-proxy=false` to run only the public tunnel. Dependency capture
+and replay share the `expose` lifecycle and stop when `expose` stops.
 
 Configure the application manually to use the printed HTTP proxy and trust the
 printed Capture CA for inspected HTTPS, exactly as in V6. Then:
@@ -45,3 +44,8 @@ capture session reconnects.
 Dependency Replay requires a running local Mockingo proxy. It is not an
 always-on cloud Virtual Endpoint, and V7 adds no query/header/body matching,
 templates, scenarios, delays, or fault injection.
+
+The listener address does not participate in matching. A container may reach a
+proxy bound with `--proxy-bind 0.0.0.0` through
+`host.docker.internal:8899`, while behaviors continue matching the real
+dependency scheme, host, port, method, and path.
