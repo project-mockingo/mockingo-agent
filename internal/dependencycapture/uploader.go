@@ -37,12 +37,14 @@ type UploaderConfig struct {
 	OnDrop                func()
 	OnSent                func()
 	OnConfig              func(tunnelprotocol.DependencyBehaviorSnapshot) error
+	OnTCPConfig           func(tunnelprotocol.TCPDependencySnapshot) error
 	Verbose               func(string, ...any)
 }
 
 type Uploader struct {
 	config          UploaderConfig
 	queue           chan tunnelprotocol.DependencyInteraction
+	tcpQueue        chan tunnelprotocol.TCPConnectionEvent
 	dropMu          sync.Mutex
 	lastDropWarning time.Time
 }
@@ -51,7 +53,22 @@ func NewUploader(config UploaderConfig) *Uploader {
 	if config.QueueSize <= 0 {
 		config.QueueSize = 100
 	}
-	return &Uploader{config: config, queue: make(chan tunnelprotocol.DependencyInteraction, config.QueueSize)}
+	return &Uploader{config: config, queue: make(chan tunnelprotocol.DependencyInteraction, config.QueueSize), tcpQueue: make(chan tunnelprotocol.TCPConnectionEvent, config.QueueSize)}
+}
+
+func (u *Uploader) EnqueueTCP(event tunnelprotocol.TCPConnectionEvent) bool {
+	message := tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeTCPConnectionEvent, TCPConnection: &event}
+	if err := tunnelprotocol.Validate(message); err != nil {
+		u.dropped()
+		return false
+	}
+	select {
+	case u.tcpQueue <- event:
+		return true
+	default:
+		u.dropped()
+		return false
+	}
 }
 
 func (u *Uploader) Enqueue(event tunnelprotocol.DependencyInteraction) bool {
@@ -202,6 +219,17 @@ func (u *Uploader) serveConnection(ctx context.Context, ws *websocket.Conn, endp
 						return
 					}
 				}
+			} else if message.Type == tunnelprotocol.TypeTCPDependencyConfig {
+				if message.TCPDependencies.EndpointID != endpointID {
+					readErrors <- errors.New("TCP dependency configuration endpoint does not match the capture session")
+					return
+				}
+				if u.config.OnTCPConfig != nil {
+					if err := u.config.OnTCPConfig(*message.TCPDependencies); err != nil {
+						readErrors <- err
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -216,12 +244,14 @@ func (u *Uploader) serveConnection(ctx context.Context, ws *websocket.Conn, endp
 			return err
 		case event := <-u.queue:
 			message = tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeDependencyInteraction, Dependency: &event}
+		case event := <-u.tcpQueue:
+			message = tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypeTCPConnectionEvent, TCPConnection: &event}
 		case <-ticker.C:
 			message = tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypePing}
 		}
 		_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if err := ws.WriteJSON(message); err != nil {
-			if message.Dependency != nil {
+			if message.Dependency != nil || message.TCPConnection != nil {
 				u.dropped()
 			}
 			return err

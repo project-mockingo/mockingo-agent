@@ -1,6 +1,7 @@
 package tunnelprotocol
 
 import (
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -40,8 +41,66 @@ func Validate(message Message) error {
 		if message.DependencyConfig == nil || validateDependencyConfig(*message.DependencyConfig) != nil {
 			return ErrInvalidMessage
 		}
+	case TypeTCPOpen, TypeTCPOpened, TypeTCPHalfClose, TypeTCPClose:
+		if uuid.Validate(message.ConnectionID) != nil {
+			return ErrInvalidMessage
+		}
+	case TypeTCPData:
+		if uuid.Validate(message.ConnectionID) != nil {
+			return ErrInvalidMessage
+		}
+		decoded, err := base64.StdEncoding.DecodeString(message.DataBase64)
+		if err != nil || len(decoded) == 0 || len(decoded) > MaxTCPFramePayload {
+			return ErrInvalidMessage
+		}
+	case TypeTCPError:
+		if uuid.Validate(message.ConnectionID) != nil || message.ErrorCode == "" {
+			return ErrInvalidMessage
+		}
+	case TypeTCPConnectionEvent:
+		if message.TCPConnection == nil || validateTCPConnection(*message.TCPConnection) != nil {
+			return ErrInvalidMessage
+		}
+	case TypeTCPDependencyConfig:
+		if message.TCPDependencies == nil || validateTCPDependencies(*message.TCPDependencies) != nil {
+			return ErrInvalidMessage
+		}
 	default:
 		return ErrUnknownMessageType
+	}
+	return nil
+}
+
+func validateTCPConnection(value TCPConnectionEvent) error {
+	if uuid.Validate(value.ID) != nil || (value.TrafficType != "INBOUND" && value.TrafficType != "DEPENDENCY") ||
+		(value.State != "OPEN" && value.State != "CLOSED" && value.State != "FAILED") || value.StartedAt.IsZero() ||
+		value.DurationMS < 0 || value.BytesClientToServer < 0 || value.BytesServerToClient < 0 ||
+		(value.TargetPort != 0 && (value.TargetPort < 1 || value.TargetPort > 65535)) ||
+		(value.ListenPort != 0 && (value.ListenPort < 1 || value.ListenPort > 65535)) ||
+		(value.PublicPort != 0 && (value.PublicPort < 1 || value.PublicPort > 65535)) {
+		return ErrInvalidMessage
+	}
+	if (value.TrafficType == "DEPENDENCY" && uuid.Validate(value.DependencyID) != nil) ||
+		(value.TrafficType == "INBOUND" && value.DependencyID != "") ||
+		(!value.LastActivityAt.IsZero() && value.LastActivityAt.Before(value.StartedAt)) {
+		return ErrInvalidMessage
+	}
+	if value.State != "OPEN" && (value.EndedAt.IsZero() || value.EndedAt.Before(value.StartedAt)) {
+		return ErrInvalidMessage
+	}
+	return nil
+}
+
+func validateTCPDependencies(value TCPDependencySnapshot) error {
+	if uuid.Validate(value.EndpointID) != nil || value.Dependencies == nil || len(value.Dependencies) > 100 {
+		return ErrInvalidMessage
+	}
+	for _, item := range value.Dependencies {
+		if uuid.Validate(item.ID) != nil || item.Name == "" || len(item.Name) > 255 ||
+			!validDependencyHost(item.ListenHost) || !validDependencyHost(item.TargetHost) ||
+			item.ListenPort < 1 || item.ListenPort > 65535 || item.TargetPort < 1 || item.TargetPort > 65535 {
+			return ErrInvalidMessage
+		}
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,10 +26,13 @@ type TunnelSessionRequest struct {
 }
 
 type EndpointResponse struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Hostname  string `json:"hostname"`
-	PublicURL string `json:"publicUrl"`
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Hostname         string `json:"hostname"`
+	PublicURL        string `json:"publicUrl"`
+	IngressTransport string `json:"ingressTransport"`
+	PublicTCPPort    int    `json:"publicTcpPort"`
+	PublicAddress    string `json:"publicAddress"`
 }
 
 type TunnelResponse struct {
@@ -204,7 +208,7 @@ func ValidateTunnelSession(request TunnelSessionRequest, response TunnelSessionR
 	if validation.Now != nil {
 		now = validation.Now
 	}
-	if request.Protocol != "http" || request.LocalPort < 1 || request.LocalPort > 65535 {
+	if (request.Protocol != "http" && request.Protocol != "tcp") || request.LocalPort < 1 || request.LocalPort > 65535 {
 		return errors.New("unsupported local tunnel target")
 	}
 	if response.Endpoint.ID == "" {
@@ -216,9 +220,18 @@ func ValidateTunnelSession(request TunnelSessionRequest, response TunnelSessionR
 	if !validHostname(response.Endpoint.Hostname) || !strings.EqualFold(response.Endpoint.Hostname, request.EndpointName+".mockingo.click") {
 		return errors.New("endpoint hostname is not a valid mockingo.click hostname")
 	}
-	publicURL, err := url.ParseRequestURI(response.Endpoint.PublicURL)
-	if err != nil || publicURL.Scheme != "https" || publicURL.User != nil || publicURL.Port() != "" || publicURL.RawQuery != "" || publicURL.Fragment != "" || !strings.EqualFold(publicURL.Hostname(), response.Endpoint.Hostname) {
-		return errors.New("public URL must be HTTPS and match the endpoint hostname")
+	if request.Protocol == "http" {
+		publicURL, err := url.ParseRequestURI(response.Endpoint.PublicURL)
+		if err != nil || publicURL.Scheme != "https" || publicURL.User != nil || publicURL.Port() != "" || publicURL.RawQuery != "" || publicURL.Fragment != "" || !strings.EqualFold(publicURL.Hostname(), response.Endpoint.Hostname) {
+			return errors.New("public URL must be HTTPS and match the endpoint hostname")
+		}
+		if (response.Endpoint.IngressTransport != "" && response.Endpoint.IngressTransport != "HTTP") || response.Endpoint.PublicTCPPort != 0 {
+			return errors.New("endpoint transport does not match the request")
+		}
+	} else {
+		if response.Endpoint.PublicURL != "" || response.Endpoint.IngressTransport != "TCP" || response.Endpoint.PublicTCPPort < 1024 || response.Endpoint.PublicTCPPort > 65535 || response.Endpoint.PublicAddress != net.JoinHostPort(response.Endpoint.Hostname, strconv.Itoa(response.Endpoint.PublicTCPPort)) {
+			return errors.New("public TCP address is invalid")
+		}
 	}
 	if response.Tunnel.SessionID == "" {
 		return errors.New("session ID is missing")

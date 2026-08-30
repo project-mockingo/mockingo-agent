@@ -48,6 +48,25 @@ func TestStandaloneCaptureCommandIsRemoved(t *testing.T) {
 	}
 }
 
+func TestTCPExposeIngressSelection(t *testing.T) {
+	t.Parallel()
+	options, err := ParseExpose([]string{"--name", "broker", "--tcp", "61616"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Protocol() != "tcp" || options.LocalPort() != 61616 || options.HTTPPort != 0 {
+		t.Fatalf("TCP options = %#v", options)
+	}
+	for _, args := range [][]string{
+		{"--name", "broker"},
+		{"--name", "broker", "--http", "8080", "--tcp", "61616"},
+	} {
+		if _, parseErr := ParseExpose(args); parseErr == nil {
+			t.Fatalf("invalid ingress selection accepted: %v", args)
+		}
+	}
+}
+
 func TestParseExposePreservesCommandArguments(t *testing.T) {
 	t.Parallel()
 	args := []string{"--name", "demo", "--http", "8080", "--env", "A=B", "--", "java", "-Dmessage=hello world", "-jar", "app.jar"}

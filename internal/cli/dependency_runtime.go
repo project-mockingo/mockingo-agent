@@ -11,6 +11,7 @@ import (
 
 	"github.com/project-mockingo/mockingo-agent/internal/apiclient"
 	"github.com/project-mockingo/mockingo-agent/internal/dependencycapture"
+	"github.com/project-mockingo/mockingo-agent/internal/tcpdependency"
 	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
@@ -37,6 +38,9 @@ type dependencyRuntime struct {
 	closeOnce       sync.Once
 	errMu           sync.Mutex
 	proxyErr        error
+	tcp             *tcpdependency.Manager
+	uploadStart     chan struct{}
+	uploadStartOnce sync.Once
 }
 
 func (a *App) startDependencyRuntime(
@@ -64,6 +68,7 @@ func (a *App) startDependencyRuntime(
 		}, nil
 	}
 	behaviors := dependencycapture.NewBehaviorStore()
+	var tcpManager *tcpdependency.Manager
 	uploader := dependencycapture.NewUploader(dependencycapture.UploaderConfig{
 		AcquireSession: createSession, Retryable: apiclient.IsRetryable,
 		QueueSize: 100, ReconnectInitialDelay: options.ReconnectInitialDelay,
@@ -86,6 +91,12 @@ func (a *App) startDependencyRuntime(
 			fmt.Fprintf(a.Stdout, "Dependency replay configuration loaded: %d active.\n", len(snapshot.Behaviors))
 			return nil
 		},
+		OnTCPConfig: func(snapshot tunnelprotocol.TCPDependencySnapshot) error {
+			if tcpManager == nil {
+				return nil
+			}
+			return tcpManager.Replace(snapshot)
+		},
 	})
 	var verbose func(string, ...any)
 	if options.Verbose {
@@ -107,9 +118,16 @@ func (a *App) startDependencyRuntime(
 		return nil, fmt.Errorf("cannot start dependency proxy on %s: the address may already be in use; use --proxy-port to choose another port or --dependency-proxy=false to disable it: %w", address, err)
 	}
 	runCtx, cancel := context.WithCancel(parent)
+	tcpManager = tcpdependency.New(runCtx, tcpdependency.Config{
+		Emit: uploader.EnqueueTCP,
+		OnError: func(name string, bindErr error) {
+			fmt.Fprintf(a.Stderr, "Failed to start TCP dependency %q: %v\n", name, bindErr)
+		},
+	})
 	runtime := &dependencyRuntime{
 		cancel: cancel, proxy: proxy, proxyAddress: listener.Addr().String(),
-		certificatePath: certificatePath, behaviors: behaviors, proxyDone: make(chan struct{}),
+		certificatePath: certificatePath, behaviors: behaviors, proxyDone: make(chan struct{}), tcp: tcpManager,
+		uploadStart: make(chan struct{}),
 	}
 	runtime.wg.Add(2)
 	go func() {
@@ -122,6 +140,11 @@ func (a *App) startDependencyRuntime(
 	}()
 	go func() {
 		defer runtime.wg.Done()
+		select {
+		case <-runCtx.Done():
+			return
+		case <-runtime.uploadStart:
+		}
 		uploadErr := uploader.Run(runCtx)
 		if runCtx.Err() == nil {
 			if uploadErr != nil {
@@ -132,6 +155,14 @@ func (a *App) startDependencyRuntime(
 		}
 	}()
 	return runtime, nil
+}
+
+// startUpload activates the endpoint-scoped capture session only after the
+// control plane has successfully reserved the tunnel endpoint. The local proxy
+// is intentionally available before then so a child process can use it during
+// startup without racing endpoint creation.
+func (r *dependencyRuntime) startUpload() {
+	r.uploadStartOnce.Do(func() { close(r.uploadStart) })
 }
 
 func (r *dependencyRuntime) printStarted(output, warnings io.Writer, endpointName string) {
@@ -178,6 +209,9 @@ func (r *dependencyRuntime) ProxyError() error {
 func (r *dependencyRuntime) Close() {
 	r.closeOnce.Do(func() {
 		r.cancel()
+		if r.tcp != nil {
+			r.tcp.Close()
+		}
 		r.proxy.CloseIdleConnections()
 		r.wg.Wait()
 	})

@@ -84,6 +84,24 @@ func TestTunnelSessionResponseValidation(t *testing.T) {
 	}
 }
 
+func TestTCPPublicAddressValidation(t *testing.T) {
+	now := time.Now().UTC()
+	request := TunnelSessionRequest{EndpointName: "spring-demo", Protocol: "tcp", LocalPort: 61616, ProtocolVersion: 1}
+	response := validTunnelResponse(now)
+	response.Endpoint.IngressTransport = "TCP"
+	response.Endpoint.PublicURL = ""
+	response.Endpoint.PublicTCPPort = 31247
+	response.Endpoint.PublicAddress = "spring-demo.mockingo.click:31247"
+	validation := TunnelSessionValidation{ExpectedGatewayHosts: []string{"gateway.mockingo.com"}, Now: func() time.Time { return now }}
+	if err := ValidateTunnelSession(request, response, validation); err != nil {
+		t.Fatalf("valid TCP endpoint rejected: %v", err)
+	}
+	response.Endpoint.PublicAddress = "spring-demo.mockingo.click:31248"
+	if err := ValidateTunnelSession(request, response, validation); err == nil {
+		t.Fatal("mismatched TCP public address accepted")
+	}
+}
+
 func TestProblemDetailAndRetryClassification(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-ID", "req-123")

@@ -23,6 +23,7 @@ import (
 
 type Config struct {
 	LocalPort             int
+	Transport             string
 	RequestTimeout        time.Duration
 	OnState               func(string)
 	Verbose               func(string, ...any)
@@ -39,16 +40,17 @@ type Config struct {
 // Session contains an ephemeral backend-issued credential. Ticket is consumed
 // by exactly one DialContext call and must never be persisted or logged.
 type Session struct {
-	EndpointID   string
-	EndpointName string
-	SessionID    string
-	ConnectURL   string
-	Ticket       string
-	PublicURL    string
+	EndpointID    string
+	EndpointName  string
+	SessionID     string
+	ConnectURL    string
+	Ticket        string
+	PublicURL     string
+	PublicAddress string
 }
 
 func (s Session) String() string {
-	return fmt.Sprintf("{EndpointID:%s EndpointName:%s SessionID:%s ConnectURL:%s Ticket:<redacted> PublicURL:%s}", s.EndpointID, s.EndpointName, s.SessionID, s.ConnectURL, s.PublicURL)
+	return fmt.Sprintf("{EndpointID:%s EndpointName:%s SessionID:%s ConnectURL:%s Ticket:<redacted> PublicURL:%s PublicAddress:%s}", s.EndpointID, s.EndpointName, s.SessionID, s.ConnectURL, s.PublicURL, s.PublicAddress)
 }
 
 type Agent struct {
@@ -328,6 +330,8 @@ func (a *Agent) serveConnection(parent context.Context, ws *websocket.Conn) erro
 	defer cancel()
 	defer ws.Close()
 	writer := &socketWriter{ws: ws}
+	tcp := newTCPRuntime(ctx, a.config.LocalPort, writer, a.config.Verbose)
+	defer tcp.closeAll()
 	var requests sync.WaitGroup
 	closed := make(chan struct{})
 	go func() {
@@ -357,6 +361,15 @@ func (a *Agent) serveConnection(parent context.Context, ws *websocket.Conn) erro
 			}()
 		case tunnelprotocol.TypePing:
 			_ = writer.write(tunnelprotocol.Message{Version: tunnelprotocol.Version, Type: tunnelprotocol.TypePong})
+		case tunnelprotocol.TypeTCPOpen:
+			if a.config.Transport == "tcp" {
+				tcp.openAsync(message.ConnectionID)
+			}
+		case tunnelprotocol.TypeTCPData, tunnelprotocol.TypeTCPHalfClose,
+			tunnelprotocol.TypeTCPClose, tunnelprotocol.TypeTCPError:
+			if a.config.Transport == "tcp" {
+				tcp.handle(message)
+			}
 		}
 	}
 }

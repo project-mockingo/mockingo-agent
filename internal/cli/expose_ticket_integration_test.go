@@ -110,6 +110,8 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 
 	var sessionRequests atomic.Int32
 	var captureSessionRequests atomic.Int32
+	var endpointReserved atomic.Bool
+	var prematureCaptureRequests atomic.Int32
 	dependencyOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/docker-dependency" {
 			t.Errorf("dependency path = %s", r.URL.Path)
@@ -132,6 +134,10 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 			if _, found := body["ownerUserId"]; found || body["endpointName"] != "spring-demo" || body["localPort"] != float64(port) {
 				t.Errorf("session body = %#v", body)
 			}
+			// Give an incorrectly eager dependency-capture request time to expose
+			// the endpoint-reservation race before completing this request.
+			time.Sleep(100 * time.Millisecond)
+			endpointReserved.Store(true)
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"endpoint": map[string]any{"id": endpointID, "name": "spring-demo", "hostname": "spring-demo.mockingo.click", "publicUrl": "https://spring-demo.mockingo.click"},
@@ -139,6 +145,14 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 			})
 		case "/api/v1/endpoints/spring-demo/dependency-capture-sessions":
 			captureSessionRequests.Add(1)
+			if !endpointReserved.Load() {
+				prematureCaptureRequests.Add(1)
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"status": http.StatusNotFound, "code": "endpoint_not_found", "message": "Endpoint not found.",
+				})
+				return
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"endpoint": map[string]any{"id": endpointID, "name": "spring-demo"},
@@ -216,6 +230,9 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 	}
 	if sessionRequests.Load() != 1 || captureSessionRequests.Load() != 1 || tunnelAuthorization.Load() != "Bearer gateway-ticket" || captureAuthorization.Load() != "Bearer dependency-ticket" {
 		t.Fatalf("session requests = %d/%d, gateway auth = %v/%v", sessionRequests.Load(), captureSessionRequests.Load(), tunnelAuthorization.Load(), captureAuthorization.Load())
+	}
+	if prematureCaptureRequests.Load() != 0 {
+		t.Fatalf("dependency capture requested before endpoint reservation: %d requests", prematureCaptureRequests.Load())
 	}
 	text := output.String()
 	for _, secret := range []string{"oauth-access", "oauth-refresh", "gateway-ticket", "dependency-ticket"} {

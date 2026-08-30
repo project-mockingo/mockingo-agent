@@ -73,7 +73,7 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo login [--api-url URL] [--issuer URL] [--callback-port PORT]")
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
-	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME (--http PORT | --tcp PORT) [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "\nExpose includes dependency capture and replay by default; use --dependency-proxy=false to opt out.")
 	fmt.Fprintln(a.Stdout, "Login uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
@@ -107,6 +107,8 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
+	localPort := options.LocalPort()
+	protocol := options.Protocol()
 	if err := naming.Validate(options.Name); err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -201,11 +203,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 	defer cleanupChild()
 
-	fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", options.HTTPPort)
+	fmt.Fprintf(a.Stdout, "Waiting for 127.0.0.1:%d...\n", localPort)
 	startupCtx, startupCancel := context.WithTimeout(runCtx, options.StartupTimeout)
 	defer startupCancel()
 	ready := make(chan error, 1)
-	go func() { ready <- readiness.Wait(startupCtx, options.HTTPPort) }()
+	go func() { ready <- readiness.Wait(startupCtx, localPort) }()
 	if child == nil {
 		select {
 		case err = <-ready:
@@ -237,7 +239,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	startupCancel()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return 1, fmt.Errorf("startup timeout: port %d did not become ready within %s", options.HTTPPort, options.StartupTimeout)
+			return 1, fmt.Errorf("startup timeout: port %d did not become ready within %s", localPort, options.StartupTimeout)
 		}
 		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
 			return 0, nil
@@ -260,7 +262,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	if options.Verbose {
 		verbose = func(format string, values ...any) { fmt.Fprintf(a.Stderr, "debug: "+format+"\n", values...) }
 	}
-	request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: "http", LocalPort: options.HTTPPort, ProtocolVersion: options.ProtocolVersion}
+	request := apiclient.TunnelSessionRequest{EndpointName: options.Name, Protocol: protocol, LocalPort: localPort, ProtocolVersion: options.ProtocolVersion}
 	validation := apiclient.TunnelSessionValidation{ExpectedGatewayHosts: strings.Split(options.ExpectedGatewayHost, ","), AllowInsecureLocal: options.AllowInsecureGateway}
 	createSession := func(sessionCtx context.Context) (agent.Session, error) {
 		response, createErr := controlClient.CreateTunnelSession(sessionCtx, request, validation)
@@ -271,17 +273,22 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 			EndpointID: response.Endpoint.ID, EndpointName: response.Endpoint.Name,
 			SessionID: response.Tunnel.SessionID, ConnectURL: response.Tunnel.ConnectURL,
 			Ticket: response.Tunnel.Ticket, PublicURL: response.Endpoint.PublicURL,
+			PublicAddress: response.Endpoint.PublicAddress,
 		}, nil
 	}
 	initial, createErr := createSession(runCtx)
 	if createErr != nil {
 		return 1, createErr
 	}
+	if dependencies != nil {
+		dependencies.startUpload()
+	}
 	publicURL := initial.PublicURL
+	publicAddress := initial.PublicAddress
 	fmt.Fprintf(a.Stdout, "✓ Endpoint reserved: %s\n", initial.EndpointName)
 	tunnelAgent := agent.New(agent.Config{
 		InitialSession: &initial, AcquireSession: createSession, Retryable: apiclient.IsRetryable, TemporaryConflict: apiclient.IsTemporarySessionConflict,
-		LocalPort: options.HTTPPort, RequestTimeout: options.RequestTimeout,
+		LocalPort: localPort, Transport: protocol, RequestTimeout: options.RequestTimeout,
 		OnState: state, Verbose: verbose, PublicURL: initial.PublicURL,
 		ReconnectEnabled: options.ReconnectEnabled, ReconnectInitialDelay: options.ReconnectInitialDelay,
 		ReconnectMaxDelay: options.ReconnectMaxDelay,
@@ -328,7 +335,11 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 			return 0, nil
 		}
 	}
-	fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, options.HTTPPort)
+	if protocol == "tcp" {
+		fmt.Fprintf(a.Stdout, "\nTCP endpoint exposed\n\nName\n%s\n\nLocal\n127.0.0.1:%d\n\nPublic\n%s\n\nWaiting for TCP connections...\n", initial.EndpointName, localPort, publicAddress)
+	} else {
+		fmt.Fprintf(a.Stdout, "\nPublic URL:\n%s\n\nForwarding:\n%s → http://127.0.0.1:%d\n\nPress Ctrl+C to stop.\n", publicURL, publicURL, localPort)
+	}
 	if child == nil {
 		select {
 		case err := <-agentDone:
@@ -368,7 +379,7 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 }
 
 func (a *App) exposeUsage() {
-	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME (--http PORT | --tcp PORT) [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "")
 	fmt.Fprintln(a.Stdout, "Starts the public tunnel and the local dependency capture/replay proxy by default.")
 	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")

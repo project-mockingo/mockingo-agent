@@ -22,3 +22,5 @@ const (
 	MaxDependencyBehaviors         = 1000
 	MaxDependencyReplayBody        = 1 << 20
 )
+
+const MaxTCPFramePayload = 32 * 1024

@@ -24,6 +24,7 @@ func (f *envFlags) Set(value string) error {
 type ExposeOptions struct {
 	Name                  string
 	HTTPPort              int
+	TCPPort               int
 	DependencyProxy       bool
 	ProxyBind             string
 	ProxyPort             int
@@ -157,6 +158,7 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	set.SetOutput(new(strings.Builder))
 	set.StringVar(&options.Name, "name", "", "tunnel name")
 	set.IntVar(&options.HTTPPort, "http", 0, "local HTTP port")
+	set.IntVar(&options.TCPPort, "tcp", 0, "local TCP port")
 	set.BoolVar(&options.DependencyProxy, "dependency-proxy", options.DependencyProxy, "run dependency capture and replay proxy")
 	set.StringVar(&options.ProxyBind, "proxy-bind", "127.0.0.1", "dependency proxy bind address")
 	set.IntVar(&options.ProxyPort, "proxy-port", 8899, "dependency proxy port")
@@ -180,8 +182,17 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	if options.Name == "" {
 		return ExposeOptions{}, errors.New("--name is required")
 	}
-	if options.HTTPPort < 1 || options.HTTPPort > 65535 {
+	if options.HTTPPort != 0 && options.TCPPort != 0 {
+		return ExposeOptions{}, errors.New("--http and --tcp are mutually exclusive")
+	}
+	if options.HTTPPort == 0 && options.TCPPort == 0 {
+		return ExposeOptions{}, errors.New("exactly one of --http or --tcp is required")
+	}
+	if options.HTTPPort < 0 || options.HTTPPort > 65535 {
 		return ExposeOptions{}, errors.New("--http must be a port between 1 and 65535")
+	}
+	if options.TCPPort < 0 || options.TCPPort > 65535 {
+		return ExposeOptions{}, errors.New("--tcp must be a port between 1 and 65535")
 	}
 	if options.ProxyPort < 1 || options.ProxyPort > 65535 {
 		return ExposeOptions{}, errors.New("--proxy-port must be between 1 and 65535")
@@ -190,8 +201,8 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	if err != nil {
 		return ExposeOptions{}, err
 	}
-	if options.DependencyProxy && options.ProxyPort == options.HTTPPort {
-		return ExposeOptions{}, errors.New("--proxy-port must differ from --http when the dependency proxy is enabled")
+	if options.DependencyProxy && options.ProxyPort == options.LocalPort() {
+		return ExposeOptions{}, errors.New("--proxy-port must differ from the ingress port when the dependency proxy is enabled")
 	}
 	if options.StartupTimeout <= 0 || options.RequestTimeout <= 0 {
 		return ExposeOptions{}, errors.New("timeouts must be greater than zero")
@@ -216,6 +227,20 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	}
 	options.Command = append([]string(nil), set.Args()...)
 	return options, nil
+}
+
+func (o ExposeOptions) LocalPort() int {
+	if o.TCPPort != 0 {
+		return o.TCPPort
+	}
+	return o.HTTPPort
+}
+
+func (o ExposeOptions) Protocol() string {
+	if o.TCPPort != 0 {
+		return "tcp"
+	}
+	return "http"
 }
 
 func normalizeProxyBind(value string) (string, error) {

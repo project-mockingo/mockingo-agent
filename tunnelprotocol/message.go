@@ -10,6 +10,14 @@ const (
 	TypeError                 = "error"
 	TypeDependencyInteraction = "dependency_interaction_completed"
 	TypeDependencyConfig      = "dependency_behavior_snapshot"
+	TypeTCPOpen               = "tcp_open"
+	TypeTCPOpened             = "tcp_opened"
+	TypeTCPData               = "tcp_data"
+	TypeTCPHalfClose          = "tcp_half_close"
+	TypeTCPClose              = "tcp_close"
+	TypeTCPError              = "tcp_error"
+	TypeTCPConnectionEvent    = "tcp_connection_event"
+	TypeTCPDependencyConfig   = "tcp_dependency_snapshot"
 )
 
 // Message is the complete protocol v1 JSON envelope. Field order and JSON
@@ -27,6 +35,48 @@ type Message struct {
 	Error            string                      `json:"error,omitempty"`
 	Dependency       *DependencyInteraction      `json:"dependency,omitempty"`
 	DependencyConfig *DependencyBehaviorSnapshot `json:"dependencyConfig,omitempty"`
+	ConnectionID     string                      `json:"connectionId,omitempty"`
+	DataBase64       string                      `json:"dataBase64,omitempty"`
+	TCPConnection    *TCPConnectionEvent         `json:"tcpConnection,omitempty"`
+	TCPDependencies  *TCPDependencySnapshot      `json:"tcpDependencies,omitempty"`
+}
+
+type TCPDependencySnapshot struct {
+	EndpointID   string          `json:"endpointId"`
+	Dependencies []TCPDependency `json:"dependencies"`
+}
+
+type TCPDependency struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ListenHost string `json:"listenHost"`
+	ListenPort int    `json:"listenPort"`
+	TargetHost string `json:"targetHost"`
+	TargetPort int    `json:"targetPort"`
+}
+
+// TCPConnectionEvent is metadata-only. Payload bytes are never retained in Traffic.
+type TCPConnectionEvent struct {
+	ID                  string    `json:"id"`
+	DependencyID        string    `json:"dependencyId,omitempty"`
+	TrafficType         string    `json:"trafficType"`
+	State               string    `json:"state"`
+	StartedAt           time.Time `json:"startedAt"`
+	EndedAt             time.Time `json:"endedAt,omitempty"`
+	LastActivityAt      time.Time `json:"lastActivityAt,omitempty"`
+	DurationMS          int64     `json:"durationMs"`
+	SourceHost          string    `json:"sourceHost,omitempty"`
+	SourcePort          int       `json:"sourcePort,omitempty"`
+	TargetHost          string    `json:"targetHost,omitempty"`
+	TargetPort          int       `json:"targetPort,omitempty"`
+	ListenHost          string    `json:"listenHost,omitempty"`
+	ListenPort          int       `json:"listenPort,omitempty"`
+	PublicHost          string    `json:"publicHost,omitempty"`
+	PublicPort          int       `json:"publicPort,omitempty"`
+	BytesClientToServer int64     `json:"bytesClientToServer"`
+	BytesServerToClient int64     `json:"bytesServerToClient"`
+	CloseReason         string    `json:"closeReason,omitempty"`
+	Error               string    `json:"error,omitempty"`
 }
 
 type DependencyBehaviorSnapshot struct {
