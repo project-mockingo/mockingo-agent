@@ -19,3 +19,14 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
       - run: make cross-build
+
+  windows-auth:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - run: go test ./internal/cli ./internal/oauth ./internal/apiclient
+      - run: go vet ./internal/cli
