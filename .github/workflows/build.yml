@@ -32,6 +32,8 @@ jobs:
             extension: .exe
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -43,7 +45,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -trimpath -o "dist/mockingo-${GOOS}-${GOARCH}${{ matrix.extension }}" ./cmd/mockingo
+          VERSION=$(git describe --tags --match 'v*' --dirty --always)
+          go build -trimpath -ldflags "-X github.com/project-mockingo/mockingo-agent/internal/cli.Version=${VERSION}" -o "dist/mockingo-${GOOS}-${GOARCH}${{ matrix.extension }}" ./cmd/mockingo
       - uses: actions/upload-artifact@v4
         with:
           name: mockingo-${{ matrix.goos }}-${{ matrix.goarch }}

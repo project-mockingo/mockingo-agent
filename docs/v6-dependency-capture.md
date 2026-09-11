@@ -11,7 +11,7 @@ the V6 baseline. V7 adds local replay through the same proxy; see
 1. Sign in and start a session:
 
    ```bash
-   mockingo expose --name integration --http 8080
+   mockingo run --name integration --http 8080
    ```
 
    This starts both the public tunnel and dependency proxy. Use
@@ -35,7 +35,7 @@ configuration is:
 ```
 
 Mockingo does not inject these options or modify Java, Node.js, Python, .NET,
-WSO2, OS, browser, or trust-store configuration. `expose` can launch only the
+WSO2, OS, browser, or trust-store configuration. `run` can launch only the
 explicit command supplied after `--`; that child still requires manual proxy
 and CA configuration.
 
@@ -46,7 +46,7 @@ To let a Docker container reach the dependency proxy, explicitly bind it to all
 IPv4 host interfaces:
 
 ```bash
-mockingo expose --name integration --http 8080 --proxy-bind 0.0.0.0
+mockingo run --name integration --http 8080 --proxy-bind 0.0.0.0
 ```
 
 The Agent distinguishes the socket bind address from client addresses in its
@@ -57,8 +57,8 @@ allows any process or machine that can reach that host address to use the
 proxy, so use it only on trusted development networks. Choose another port with
 `--proxy-port 9000` when needed.
 
-The dependency proxy is a required part of the default `expose` startup. If its
-listener cannot bind, `expose` fails before opening the public tunnel. Use
+The dependency proxy is a required part of the default `run` startup. If its
+listener cannot bind, `run` fails before opening the public tunnel. Use
 another proxy port or `--dependency-proxy=false`; it never continues in an
 ambiguous tunnel-only state.
 
@@ -92,7 +92,7 @@ services:
 For WSO2 EI 6.6.0 running in Docker, run:
 
 ```bash
-mockingo expose --name wso2-demo --http 8280 --proxy-bind 0.0.0.0
+mockingo run --name wso2-demo --http 8280 --proxy-bind 0.0.0.0
 ```
 
 Configure WSO2 outbound HTTP/S with `proxyHost = host.docker.internal` and
@@ -115,7 +115,7 @@ Certificate-pinned applications and mTLS are not interceptable in V6. Tunnel
 those exact hosts without decryption:
 
 ```bash
-mockingo expose --name integration --http 8080 \
+mockingo run --name integration --http 8080 \
   --passthrough-host auth.company.com \
   --passthrough-host secure.partner.com
 ```

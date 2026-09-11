@@ -21,7 +21,7 @@ func (f *envFlags) Set(value string) error {
 	return nil
 }
 
-type ExposeOptions struct {
+type RunOptions struct {
 	Name                  string
 	HTTPPort              int
 	DependencyProxy       bool
@@ -114,37 +114,37 @@ func ParseEnvironment(values []string) (map[string]string, error) {
 	return result, nil
 }
 
-func ParseExpose(args []string) (ExposeOptions, error) {
-	var options ExposeOptions
+func ParseRun(args []string) (RunOptions, error) {
+	var options RunOptions
 	var env envFlags
 	var passthrough stringFlags
 	protocolVersion, err := envInt("MOCKINGO_TUNNEL_PROTOCOL_VERSION", tunnelprotocol.Version)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	reconnectEnabled, err := envBool("MOCKINGO_RECONNECT_ENABLED", true)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	dependencyProxy, err := envBool("MOCKINGO_DEPENDENCY_PROXY_ENABLED", true)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	allowInsecure, err := envBool("MOCKINGO_ALLOW_INSECURE_GATEWAY", false)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	allowFile, err := envBool("MOCKINGO_ALLOW_FILE_CREDENTIALS", false)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	initialDelay, err := envDuration("MOCKINGO_RECONNECT_INITIAL_DELAY", time.Second)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	maxDelay, err := envDuration("MOCKINGO_RECONNECT_MAX_DELAY", 30*time.Second)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	options.ProtocolVersion = protocolVersion
 	options.ReconnectEnabled = reconnectEnabled
@@ -153,7 +153,7 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	options.AllowFileCredentials = allowFile
 	options.ReconnectInitialDelay = initialDelay
 	options.ReconnectMaxDelay = maxDelay
-	set := flag.NewFlagSet("expose", flag.ContinueOnError)
+	set := flag.NewFlagSet("run", flag.ContinueOnError)
 	set.SetOutput(new(strings.Builder))
 	set.StringVar(&options.Name, "name", "", "tunnel name")
 	set.IntVar(&options.HTTPPort, "http", 0, "local HTTP port")
@@ -175,44 +175,44 @@ func ParseExpose(args []string) (ExposeOptions, error) {
 	set.BoolVar(&options.AllowInsecureGateway, "allow-insecure-gateway", options.AllowInsecureGateway, "allow ws:// for an explicitly trusted loopback gateway")
 	set.BoolVar(&options.AllowFileCredentials, "allow-insecure-storage", options.AllowFileCredentials, "allow owner-only fallback OAuth credential storage")
 	if err := set.Parse(args); err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	if options.Name == "" {
-		return ExposeOptions{}, errors.New("--name is required")
+		return RunOptions{}, errors.New("--name is required")
 	}
 	if options.HTTPPort < 1 || options.HTTPPort > 65535 {
-		return ExposeOptions{}, errors.New("--http must be a port between 1 and 65535")
+		return RunOptions{}, errors.New("--http must be a port between 1 and 65535")
 	}
 	if options.ProxyPort < 1 || options.ProxyPort > 65535 {
-		return ExposeOptions{}, errors.New("--proxy-port must be between 1 and 65535")
+		return RunOptions{}, errors.New("--proxy-port must be between 1 and 65535")
 	}
 	options.ProxyBind, err = normalizeProxyBind(options.ProxyBind)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	if options.DependencyProxy && options.ProxyPort == options.HTTPPort {
-		return ExposeOptions{}, errors.New("--proxy-port must differ from --http when the dependency proxy is enabled")
+		return RunOptions{}, errors.New("--proxy-port must differ from --http when the dependency proxy is enabled")
 	}
 	if options.StartupTimeout <= 0 || options.RequestTimeout <= 0 {
-		return ExposeOptions{}, errors.New("timeouts must be greater than zero")
+		return RunOptions{}, errors.New("timeouts must be greater than zero")
 	}
 	if options.ProtocolVersion != 1 {
-		return ExposeOptions{}, errors.New("--tunnel-protocol-version must be 1")
+		return RunOptions{}, errors.New("--tunnel-protocol-version must be 1")
 	}
 	if options.ReconnectInitialDelay <= 0 || options.ReconnectMaxDelay < options.ReconnectInitialDelay {
-		return ExposeOptions{}, errors.New("reconnect delays must be positive and maximum must not be less than initial")
+		return RunOptions{}, errors.New("reconnect delays must be positive and maximum must not be less than initial")
 	}
 	if strings.TrimSpace(options.ExpectedGatewayHost) == "" {
-		return ExposeOptions{}, errors.New("--expected-gateway-host is required")
+		return RunOptions{}, errors.New("--expected-gateway-host is required")
 	}
 	parsedEnv, err := ParseEnvironment(env)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	options.Environment = parsedEnv
 	options.PassthroughHosts, err = normalizePassthroughHosts(passthrough)
 	if err != nil {
-		return ExposeOptions{}, err
+		return RunOptions{}, err
 	}
 	options.Command = append([]string(nil), set.Args()...)
 	return options, nil
@@ -237,4 +237,14 @@ func formatCommand(parts []string) string {
 		}
 	}
 	return strings.Join(quoted, " ")
+}
+
+// ExposeOptions contains options for the deprecated expose command.
+// Deprecated: use RunOptions instead.
+type ExposeOptions = RunOptions
+
+// ParseExpose parses arguments for the deprecated expose command.
+// Deprecated: use ParseRun instead.
+func ParseExpose(args []string) (RunOptions, error) {
+	return ParseRun(args)
 }

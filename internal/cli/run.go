@@ -47,8 +47,13 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.whoami(ctx, args[1:])
 	case "logout":
 		err = a.logout(ctx, args[1:])
-	case "expose":
-		code, err = a.expose(ctx, args[1:])
+	case "run", "expose":
+		if args[0] == "expose" {
+			fmt.Fprintln(a.Stderr, "Warning: mockingo expose is deprecated; use mockingo run instead.")
+		}
+		code, err = a.run(ctx, args[1:])
+	case "version":
+		code, err = a.version(args[1:])
 	case "help", "--help", "-h":
 		a.usage()
 		return 0
@@ -73,8 +78,10 @@ func (a *App) usage() {
 	fmt.Fprintln(a.Stdout, "  mockingo login [--api-url URL] [--issuer URL] [--callback-port PORT]")
 	fmt.Fprintln(a.Stdout, "  mockingo whoami [--json]")
 	fmt.Fprintln(a.Stdout, "  mockingo logout")
-	fmt.Fprintln(a.Stdout, "  mockingo expose --name NAME --http PORT [options] [-- command args...]")
-	fmt.Fprintln(a.Stdout, "\nExpose includes dependency capture and replay by default; use --dependency-proxy=false to opt out.")
+	fmt.Fprintln(a.Stdout, "  mockingo run --name NAME --http PORT [options] [-- command args...]")
+	fmt.Fprintln(a.Stdout, "  mockingo version")
+	fmt.Fprintln(a.Stdout, "\nThe expose command is a deprecated alias for run.")
+	fmt.Fprintln(a.Stdout, "Run includes dependency capture and replay by default; use --dependency-proxy=false to opt out.")
 	fmt.Fprintln(a.Stdout, "Login uses Clerk OAuth Authorization Code Flow with PKCE.")
 }
 
@@ -93,17 +100,17 @@ func (a *App) path() (string, error) {
 	return config.Path()
 }
 
-func (a *App) expose(ctx context.Context, args []string) (int, error) {
+func (a *App) run(ctx context.Context, args []string) (int, error) {
 	for _, arg := range args {
 		if arg == "--" {
 			break
 		}
 		if arg == "--help" || arg == "-h" {
-			a.exposeUsage()
+			a.runUsage()
 			return 0, nil
 		}
 	}
-	options, err := ParseExpose(args)
+	options, err := ParseRun(args)
 	if err != nil {
 		return 2, fmt.Errorf("invalid arguments: %w", err)
 	}
@@ -367,8 +374,8 @@ func (a *App) expose(ctx context.Context, args []string) (int, error) {
 	}
 }
 
-func (a *App) exposeUsage() {
-	fmt.Fprintln(a.Stdout, "Usage: mockingo expose --name NAME --http PORT [options] [-- command args...]")
+func (a *App) runUsage() {
+	fmt.Fprintln(a.Stdout, "Usage: mockingo run --name NAME --http PORT [options] [-- command args...]")
 	fmt.Fprintln(a.Stdout, "")
 	fmt.Fprintln(a.Stdout, "Starts the public tunnel and the local dependency capture/replay proxy by default.")
 	fmt.Fprintln(a.Stdout, "Authentication: Clerk OAuth via the Mockingo control plane; gateway connections use backend-issued tunnel tickets.")

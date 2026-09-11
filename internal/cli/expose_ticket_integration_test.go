@@ -23,7 +23,16 @@ import (
 	"github.com/project-mockingo/mockingo-agent/tunnelprotocol"
 )
 
-func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
+func TestRunAndExposeUseOAuthControlPlaneAndGatewayTicket(t *testing.T) {
+	for _, command := range []string{"run", "expose"} {
+		t.Run(command, func(t *testing.T) {
+			testRunUsesOAuthControlPlaneAndGatewayTicket(t, command)
+		})
+	}
+}
+
+func testRunUsesOAuthControlPlaneAndGatewayTicket(t *testing.T, command string) {
+	t.Helper()
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/probe" {
 			t.Errorf("local path = %s", r.URL.Path)
@@ -166,7 +175,7 @@ func TestExposeUsesOAuthControlPlaneAndGatewayTicket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- app.Run(ctx, []string{"expose", "--name", "spring-demo", "--http", fmt.Sprint(port), "--proxy-bind", "0.0.0.0", "--proxy-port", fmt.Sprint(proxyPort), "--expected-gateway-host", "127.0.0.1", "--allow-insecure-gateway", "--reconnect=false"})
+		done <- app.Run(ctx, []string{command, "--name", "spring-demo", "--http", fmt.Sprint(port), "--proxy-bind", "0.0.0.0", "--proxy-port", fmt.Sprint(proxyPort), "--expected-gateway-host", "127.0.0.1", "--allow-insecure-gateway", "--reconnect=false"})
 	}()
 	select {
 	case <-connected:

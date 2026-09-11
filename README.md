@@ -16,9 +16,15 @@ public request --> https://<endpoint-name>.mockingo.click --> localhost
 ```bash
 mockingo login
 mockingo whoami
-mockingo expose --name spring-demo --http 8080
+mockingo run --name spring-demo --http 8080
 mockingo logout
+mockingo version
 ```
+
+`mockingo expose` is deprecated and remains available as an alias for
+`mockingo run`, with the same options and behavior. It prints a deprecation
+warning to stderr. Use `mockingo version` to print the CLI version without
+logging in.
 
 Login uses OAuth Authorization Code Flow with PKCE. Access and refresh tokens
 are stored under service `mockingo`, account `oauth:<issuer>:<client-id>`, in
@@ -33,7 +39,7 @@ For a different deployment, pass `--api-url` or set `MOCKINGO_API_URL`; explicit
 `MOCKINGO_OAUTH_CLIENT_ID`, and `MOCKINGO_OAUTH_SCOPES` values override fields
 advertised by the control plane.
 
-`mockingo expose` sends the OAuth access token only to the Spring Boot control
+`mockingo run` sends the OAuth access token only to the Spring Boot control
 plane. It validates returned Gateway URLs, sends the public-tunnel ticket only
 to `/v1/connect`, and sends the separate dependency-capture ticket only to
 `/v1/dependency-capture/connect`. Every reconnect requests a new backend
@@ -44,7 +50,7 @@ legacy token login/expose modes are not supported.
 
 ## Dependency capture and replay
 
-`mockingo expose --name <endpoint> --http <port>` starts the public tunnel and,
+`mockingo run --name <endpoint> --http <port>` starts the public tunnel and,
 by default, a loopback-only explicit dependency HTTP/S proxy on
 `127.0.0.1:8899`. Use `--dependency-proxy=false` to opt out. To let a Docker
 Desktop container reach the proxy, opt in to a non-loopback listener with
@@ -63,7 +69,7 @@ origin connection; see
 
 ## Virtual endpoints
 
-Endpoint origin mode is persistent cloud configuration; the CLI has no `--virtual` mode and never executes mocks. The control plane rejects `mockingo expose` for a Virtual endpoint and directs the user to switch it to Local. When a connected Local endpoint is switched to Virtual, the Gateway closes the tunnel with `endpoint_virtualized`; that reason ends the expose session without entering the normal reconnect loop. Other transient disconnects keep the existing reconnect behavior.
+Endpoint origin mode is persistent cloud configuration; the CLI has no `--virtual` mode and never executes mocks. The control plane rejects `mockingo run` for a Virtual endpoint and directs the user to switch it to Local. When a connected Local endpoint is switched to Virtual, the Gateway closes the tunnel with `endpoint_virtualized`; that reason ends the run session without entering the normal reconnect loop. Other transient disconnects keep the existing reconnect behavior.
 
 ## Tunnel protocol
 
@@ -96,6 +102,10 @@ make cross-build
 ```
 
 Release artifacts contain only CLI binaries for Windows, Linux, and macOS.
+Release builds embed their Git tag, and `make build` / `make cross-build`
+embed the Git description (or an explicit `VERSION=vX.Y.Z` override).
+Other builds report Go's embedded module version when available (including
+`go install` with a module version), or `dev` when no version is available.
 This repository has no gateway command, server routes, PostgreSQL code,
 gateway Dockerfile, Caddy configuration, or gateway deployment pipeline.
 

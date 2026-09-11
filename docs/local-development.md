@@ -9,7 +9,7 @@ go work sync
 cd mockingo-agent
 go test ./...
 go run ./cmd/mockingo login
-go run ./cmd/mockingo expose --expected-gateway-host localhost --allow-insecure-gateway --name spring-demo --http 8080
+go run ./cmd/mockingo run --expected-gateway-host localhost --allow-insecure-gateway --name spring-demo --http 8080
 ```
 
 Run the Spring Boot control plane and sibling `mockingo-gateway` separately.
